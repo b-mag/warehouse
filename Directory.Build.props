@@ -1,0 +1,16 @@
+<Project>
+
+  <!--
+    Solution-wide build settings for Forge.
+    Centralizes the .NET 10 / C# 14 language contract and analysis defaults
+    so every project inherits them consistently.
+  -->
+  <PropertyGroup>
+    <LangVersion>14.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+  </PropertyGroup>
+
+</Project>

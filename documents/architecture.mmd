@@ -1,0 +1,62 @@
+﻿%%{init: {"theme":"base","themeVariables":{"fontfamily":"Segoe UI, Arial","fontSize":"14px","lineColor":"#5b6b7b"}}}%%
+flowchart TB
+    classDef core fill:#dceaff,stroke:#2b6cb0,stroke-width:2px,color:#1a365d;
+    classDef driver fill:#e6f6e6,stroke:#2f855a,stroke-width:2px,color:#1c4532;
+    classDef game fill:#fff2d9,stroke:#b7791f,stroke-width:2px,color:#5f3d0a;
+    classDef host fill:#f0e6ff,stroke:#6b46c1,stroke-width:2px,color:#322659;
+    classDef shared fill:#eef1f4,stroke:#5b6b7b,stroke-width:2px,color:#2d3748,stroke-dasharray:4 3;
+    classDef infra fill:#ffe6ea,stroke:#c53030,stroke-width:2px,color:#63171b;
+
+    subgraph LEGEND["Legend"]
+        direction LR
+        L1["Solid arrow = compile-time project reference"]
+        L2["Dashed arrow = runtime / network (REST + SignalR)"]
+    end
+
+    subgraph GAMEBOX["Game Layer &nbsp;(pure visualization + operator control - NO business rules)"]
+        direction LR
+        WEB["Forge.Game / Web<br/><small>Next.js + React Three Fiber<br/>live isometric operations view</small>"]:::game
+        MAUI["Forge.Game / MAUI<br/><small>read-only cold-chain monitor</small>"]:::game
+    end
+
+    subgraph HOSTBOX["Host"]
+        API["Forge.Api<br/><small>ASP.NET Core - headless<br/>REST + SignalR endpoints</small>"]:::host
+    end
+
+    subgraph DRIVERBOX["Input Driver Layer &nbsp;(pluggable - swap for a Real-World driver)"]
+        SIM["Forge.Simulation<br/><small>accelerated clock, arrival / demand /<br/>temperature generators, tick loop</small>"]:::driver
+    end
+
+    subgraph COREBOX["WMS_Core &nbsp;(reusable, simulation-agnostic - all warehouse business rules)"]
+        direction TB
+        APP["Forge.Application<br/><small>CQRS use-case handlers, abstractions:<br/>IWarehouseInputDriver, IClock, IEventBus,<br/>IMLPredictor, repositories, slotting</small>"]:::core
+        DOM["Forge.Domain<br/><small>pure C# rules: FEFO, expiry decay,<br/>excursion, capacity, slotting, labor,<br/>docks, spatial grid + reservations</small>"]:::core
+    end
+
+    INFRA["Forge.Infrastructure<br/><small>EF Core + embedded Postgres, in-process event bus,<br/>SignalR real-time, ML.NET baseline skeleton<br/>(implements Application abstractions)</small>"]:::infra
+
+    CONTRACTS["Forge.Contracts<br/><small>shared DTOs, public interfaces, event schemas<br/>(the ONLY thing the Game may reference)</small>"]:::shared
+
+    %% Runtime edges (dashed)
+    WEB -. "REST + SignalR" .-> API
+    MAUI -. "SignalR (read-only)" .-> API
+
+    %% Compile-time references (solid)
+    API --> INFRA
+    API --> SIM
+    API --> APP
+    API --> CONTRACTS
+
+    SIM --> APP
+    SIM --> DOM
+    SIM --> CONTRACTS
+
+    INFRA --> APP
+    INFRA --> DOM
+    INFRA --> CONTRACTS
+
+    APP --> DOM
+    APP --> CONTRACTS
+
+    WEB --> CONTRACTS
+    MAUI --> CONTRACTS

@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Forge.Infrastructure\Forge.Infrastructure.csproj" />
+    <ProjectReference Include="..\Forge.Application\Forge.Application.csproj" />
+    <ProjectReference Include="..\Forge.Simulation\Forge.Simulation.csproj" />
+    <ProjectReference Include="..\Forge.Contracts\Forge.Contracts.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+</Project>

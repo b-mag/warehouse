@@ -1,0 +1,14 @@
+{
+  "solution": {
+    "path": "Forge.sln",
+    "projects": [
+      "src\\Forge.Contracts\\Forge.Contracts.csproj",
+      "src\\Forge.Domain\\Forge.Domain.csproj",
+      "src\\Forge.Application\\Forge.Application.csproj",
+      "src\\Forge.Infrastructure\\Forge.Infrastructure.csproj",
+      "src\\Forge.Api\\Forge.Api.csproj",
+      "src\\Forge.Simulation\\Forge.Simulation.csproj",
+      "tests\\Forge.Tests\\Forge.Tests.csproj"
+    ]
+  }
+}
