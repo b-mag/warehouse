@@ -6,6 +6,47 @@
     <ProjectReference Include="..\Forge.Contracts\Forge.Contracts.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!--
+      EF Core persistence (Req 26.1). The Npgsql provider is used for BOTH the default
+      embedded Postgres and a container-hosted Postgres; only the connection string differs
+      (design "Persistence and Seeding"). Versions are pinned exactly (no floating ranges)
+      to .NET 10-compatible releases: EF Core 10.0.x and the Npgsql EF Core provider 10.0.0.
+    -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.11" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.11" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.0" />
+    <!--
+      EF Core design-time tooling (task 28.2): enables `dotnet ef migrations add` to build the model
+      and scaffold migrations against the Npgsql provider. Pinned to the same 10.0.11 EF Core release
+      as the runtime packages so the design-time and runtime models never diverge.
+    -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.11">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <!--
+      Embedded Postgres provisioner (Req 26.1). MysticMind.PostgresEmbed runs a self-managed local
+      Postgres server (auto-detecting OS/arch; Windows x64 supported) backed by the zonky minimal
+      embedded-postgres binaries, so the app needs NO external database setup. Latest stable release,
+      pinned exactly (no floating range). It targets net6/7/8 (net9 computed) and loads cleanly under
+      net10.0. Only exercised when Embedded=true; container mode never touches it.
+    -->
+    <PackageReference Include="MysticMind.PostgresEmbed" Version="4.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Real-time transport (Req 23; task 32.1). The SignalRStatePublisher and its ISimulationClientNotifier
+      seam distribute live state over the Real_Time_Channel. Referencing the ASP.NET Core shared
+      framework (rather than a standalone package) is the supported way for a .NET 10 class library to
+      use the SignalR server abstractions (IHubContext, Microsoft.AspNetCore.SignalR) — the runtime is
+      supplied by the ASP.NET Core host at composition time, keeping this library free of a pinned,
+      separately-versioned SignalR package.
+    -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>

@@ -131,3 +131,11 @@ desktop.ini
 **/.kiro/
 *.kiro
 .config.kiro
+
+# Log files (build/test diagnostics, ad-hoc run logs)
+*.log
+
+# Ad-hoc test result directories (dotnet test --results-directory)
+TestResults/
+TR2/
+TR3/

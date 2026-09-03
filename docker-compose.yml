@@ -1,0 +1,40 @@
+﻿# Forge - optional external services for NON-embedded operation.
+#
+# Embedded Postgres is the DEFAULT (see README "Running Forge") and needs none of this.
+# Use this compose file only when you set Forge:Embedded=false in src/Forge.Api/appsettings.json
+# to run against a container-hosted Postgres instead of the embedded instance.
+#
+#   docker compose up -d postgres
+#
+# RabbitMQ is included but reserved for Phase 2 (the in-process event bus is used in Phase 1).
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: forge-postgres
+    environment:
+      POSTGRES_USER: forge
+      POSTGRES_PASSWORD: forge
+      POSTGRES_DB: forge
+    ports:
+      - "5432:5432"
+    volumes:
+      - forge-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forge -d forge"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Phase 2 only - not used by the Phase 1 in-process event bus.
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: forge-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    profiles:
+      - phase2
+
+volumes:
+  forge-pgdata:

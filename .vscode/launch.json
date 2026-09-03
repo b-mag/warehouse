@@ -1,0 +1,49 @@
+﻿{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Api (headless, embedded Postgres)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build-api",
+      "program": "${workspaceFolder}/src/Forge.Api/bin/Debug/net10.0/Forge.Api.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/src/Forge.Api",
+      "stopAtEntry": false,
+      "serverReadyAction": {
+        "action": "openExternally",
+        "pattern": "Now listening on:\\s+(https?://\\S+)",
+        "uriFormat": "%s/api/query/snapshot"
+      },
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "ASPNETCORE_URLS": "http://localhost:5195"
+      },
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Web client (Next.js dev)",
+      "type": "node",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/src/Forge.Game/web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "serverReadyAction": {
+        "action": "openExternally",
+        "pattern": "local:\\s+(https?://\\S+)",
+        "uriFormat": "%s"
+      },
+      "console": "integratedTerminal"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Forge: Engine + Web client",
+      "configurations": [
+        "Debug Api (headless, embedded Postgres)",
+        "Web client (Next.js dev)"
+      ],
+      "stopAll": true
+    }
+  ]
+}

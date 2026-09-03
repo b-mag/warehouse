@@ -14,6 +14,20 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
     <PackageReference Include="CsCheck" Version="4.8.0" />
     <PackageReference Include="NetArchTest.Rules" Version="1.3.2" />
+    <!--
+      Test-only EF Core in-memory provider (task 28.2): exercises the repositories' Add/Update/query/
+      SaveChanges round-trips without a live Postgres (the live-Postgres migration integration test is
+      the optional task 28.3). Pinned to the same 10.0.11 EF Core release as the runtime packages.
+    -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="10.0.11" />
+  </ItemGroup>
+
+  <!--
+    ASP.NET Core shared framework: gives the Api-hub tests (task 33.1) access to the SignalR server
+    types (Hub, IHubContext, IClientProxy) without a running server, matching the Forge.Api Web SDK.
+  -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
   <ItemGroup>
@@ -21,6 +35,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\Forge.Api\Forge.Api.csproj" />
     <ProjectReference Include="..\..\src\Forge.Domain\Forge.Domain.csproj" />
     <ProjectReference Include="..\..\src\Forge.Application\Forge.Application.csproj" />
     <ProjectReference Include="..\..\src\Forge.Infrastructure\Forge.Infrastructure.csproj" />

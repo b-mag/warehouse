@@ -5,6 +5,16 @@
     <ProjectReference Include="..\Forge.Contracts\Forge.Contracts.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!--
+      DI seam only: AddForgeApplication (the WMS Core Application composition helper, task 33.3) needs
+      IServiceCollection. The abstractions package carries no container implementation and no ASP.NET
+      Core / EF Core dependency, so the Application layer stays free of Infrastructure/host concerns and
+      the layer-boundary architecture tests remain satisfied. Pinned to the .NET 10 release line.
+    -->
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
