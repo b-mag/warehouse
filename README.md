@@ -4,6 +4,9 @@
 
 A full Warehouse Management System (WMS), a warehouse simulation, and a visual management tool ("the game") for a futuristic food-gel distribution center.
 
+<img width="2536" height="1341" alt="phase1" src="https://github.com/user-attachments/assets/d79dd542-5d56-419b-ab37-a6cd00b4a864" />
+
+
 ## Project Goal
 
 Forge delivers three things that fit together as one solution:
