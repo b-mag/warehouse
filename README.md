@@ -1,4 +1,4 @@
-﻿# Forge
+# Forge
 
 **Forge - Food Organization and Resource Guidance Engine**
 
@@ -47,6 +47,8 @@ After the three layers are in place, the WMS is documented in depth: which typic
 ## Running Forge
 
 Forge Phase 1 runs the **headless engine**: the WMS Core driven by the accelerated Simulation input driver, exposing REST + SignalR. It uses **embedded Postgres** by default, so there is **no external database to install** — the first run downloads the Postgres binaries (~10 MB) once and reuses them thereafter.
+
+> **New here? Read the [Operator Guide](documents/OPERATOR_GUIDE.md).** It is written like a video-game manual — how to "press start," what every on-screen control and metric means, and a plain-language glossary of the warehouse terms you will see.
 
 ### Prerequisites
 
@@ -131,6 +133,8 @@ npm run dev        # serves the client on http://localhost:3000
 ```
 
 Then open `http://localhost:3000`. The client connects to the engine at `http://localhost:5195` by default; override with the `NEXT_PUBLIC_FORGE_API` environment variable. If the engine is not running yet, the client shows a "connecting" state and attaches automatically once the engine is up.
+
+Once it is on screen, the [Operator Guide](documents/OPERATOR_GUIDE.md) walks through every control, metric, and warehouse term - game-manual style.
 
 In VS Code the launch config includes a **Web client (Next.js dev)** entry and a **Forge: Engine + Web client** compound that starts both the engine and the web client together. Run npm install in `src/Forge.Game/web` once before the first launch.
 
