@@ -1,4 +1,4 @@
-﻿{
+{
   "version": "0.2.0",
   "configurations": [
     {
@@ -10,6 +10,11 @@
       "args": [],
       "cwd": "${workspaceFolder}/src/Forge.Api",
       "stopAtEntry": false,
+      // Only break on exceptions that are unhandled in OUR code. The startup/refresh snapshot
+      // request is routinely cancelled by the client (page refresh, SignalR reconnect); the
+      // resulting OperationCanceledException is caught in QueryController and returned as 499, so
+      // it must NOT stop the debugger.
+      "justMyCode": true,
       "serverReadyAction": {
         "action": "openExternally",
         "pattern": "Now listening on:\\s+(https?://\\S+)",

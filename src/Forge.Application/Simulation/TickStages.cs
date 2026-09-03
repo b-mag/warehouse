@@ -120,10 +120,35 @@ internal static class TickStages
         foreach (var agent in Ordered(state.Agents, a => a.Id))
         {
             var path = agent.CurrentPath;
-            if (path is null || path.StepCount == 0)
+
+            // Dispatch: an idle agent (no path, or standing on its path's destination) is handed a
+            // fresh destination and routed there, so the warehouse stays visibly in motion. The
+            // destination is a deterministic function of the agent id + its current cell, so identical
+            // state reproduces identical dispatch (Req 19.6). This is Phase-1 "keep agents working"
+            // routing; tying each trip to a specific Pick/PutAway task is a later step.
+            if (path is null || path.StepCount == 0 || agent.Position == path.Cells[^1])
             {
-                // No assignment or a single-cell (already-at-destination) path: nothing to advance.
-                continue;
+                var target = NextDestination(state.Grid, agent);
+                if (target is not { } dest || dest == agent.Position)
+                {
+                    continue; // nowhere to send it this tick (degenerate grid)
+                }
+
+                var dispatchPlan = planner.Plan(state.Grid, agent.Position, dest);
+                if (dispatchPlan.IsUnroutable)
+                {
+                    var unroutableTaskId = taskForAgent(agent);
+                    if (unroutableTaskId is { } uid)
+                    {
+                        events.Add(new UnroutableTask(
+                            uid, agent.Position.X, agent.Position.Y, dest.X, dest.Y, now));
+                    }
+
+                    continue;
+                }
+
+                agent.AssignPath(dispatchPlan.Path);
+                path = dispatchPlan.Path;
             }
 
             var destination = path.Cells[^1];
@@ -280,6 +305,73 @@ internal static class TickStages
         }
 
         return events;
+    }
+
+    /// <summary>
+    /// Pick the next patrol destination for an idle <paramref name="agent"/> on <paramref name="grid"/>
+    /// (Phase-1 dispatch). Destinations rotate through a fixed ring of in-bounds anchor cells (the grid
+    /// corners and edge midpoints) so agents shuttle across long, visible routes; the choice is a pure
+    /// function of the agent id and its current cell, so identical state reproduces identical dispatch
+    /// (Req 19.6). Returns <see langword="null"/> for a degenerate (zero-size) grid.
+    /// </summary>
+    private static Cell? NextDestination(WarehouseGrid grid, Agent agent)
+    {
+        if (grid.Width <= 0 || grid.Height <= 0)
+        {
+            return null;
+        }
+
+        int maxX = grid.Width - 1;
+        int maxY = grid.Height - 1;
+        int midX = maxX / 2;
+        int midY = maxY / 2;
+
+        // A fixed ring of anchors, all guaranteed in-bounds (the demo grid is all-aisle so each is
+        // reachable). Order is stable, which keeps dispatch deterministic.
+        Cell[] anchors =
+        {
+            new(0, 0),
+            new(maxX, 0),
+            new(maxX, maxY),
+            new(0, maxY),
+            new(midX, 0),
+            new(maxX, midY),
+            new(midX, maxY),
+            new(0, midY),
+        };
+
+        // Start the rotation from a stable per-agent offset, then advance by where the agent currently
+        // is, so on arrival it deterministically moves on to a different anchor rather than re-picking
+        // the one it is standing on.
+        int baseOffset = (int)(StableGuidFold(agent.Id.Value) % (uint)anchors.Length);
+        for (int i = 0; i < anchors.Length; i++)
+        {
+            var candidate = anchors[(baseOffset + i) % anchors.Length];
+            if (candidate != agent.Position)
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// A stable, process-independent unsigned fold of a <see cref="Guid"/> (FNV-1a over its 16 bytes).
+    /// Used instead of <see cref="object.GetHashCode"/> so dispatch is reproducible across processes,
+    /// matching the seeding/determinism convention used elsewhere in the solution.
+    /// </summary>
+    private static uint StableGuidFold(Guid value)
+    {
+        Span<byte> bytes = stackalloc byte[16];
+        value.TryWriteBytes(bytes);
+        uint hash = 2166136261u;
+        foreach (var b in bytes)
+        {
+            hash = unchecked((hash ^ b) * 16777619u);
+        }
+
+        return hash;
     }
 
     /// <summary>

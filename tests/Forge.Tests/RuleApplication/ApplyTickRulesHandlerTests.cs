@@ -151,6 +151,54 @@ public sealed class ApplyTickRulesHandlerTests
     }
 
     [Fact]
+    public async Task Stage3_idle_agent_is_dispatched_a_destination_and_moves()
+    {
+        // The dispatch step: an agent with NO assigned path is handed a patrol destination, routed
+        // there, and advanced this tick — so the warehouse stays visibly in motion (the fix that made
+        // the agents actually travel). Verifies the agent leaves its start cell and its position stays
+        // on the (all-aisle) grid.
+        var ctx = new TestContext();
+        var grid = new WarehouseGrid(16, 16); // all-aisle: every anchor is reachable
+        var agent = new Agent(AgentId.New(), WorkerId.New(), new Cell(0, 0), cellsPerSecond: 2);
+        // NOTE: no AssignPath — the agent is idle and must be dispatched by the stage itself.
+        ctx.TickState.Set(new TickState(grid, new[] { agent }, new ReservationLedger(), Array.Empty<Starship>()));
+
+        var result = await ctx.Handler.ApplyTickRulesAsync(Delta);
+
+        Assert.True(result.IsSuccess);
+        // It was dispatched a path and advanced off its start cell.
+        Assert.NotEqual(new Cell(0, 0), agent.Position);
+        Assert.InRange(agent.Position.X, 0, grid.Width - 1);
+        Assert.InRange(agent.Position.Y, 0, grid.Height - 1);
+        Assert.NotNull(agent.CurrentPath);
+        Assert.Equal(1, ctx.UnitOfWork.SaveCount); // the agent move was staged + committed
+    }
+
+    [Fact]
+    public async Task Stage3_dispatch_is_deterministic_for_identical_state()
+    {
+        // Same agent id + same start cell + same delta must yield the same dispatched position, so the
+        // "living warehouse" motion stays reproducible (Req 19.6).
+        var agentId = new AgentId(new Guid("33333333-3333-3333-3333-333333333333"));
+
+        static async Task<Cell> Run(AgentId id)
+        {
+            var ctx = new TestContext();
+            var grid = new WarehouseGrid(16, 16);
+            var agent = new Agent(id, WorkerId.New(), new Cell(2, 2), cellsPerSecond: 2);
+            ctx.TickState.Set(new TickState(grid, new[] { agent }, new ReservationLedger(), Array.Empty<Starship>()));
+            await ctx.Handler.ApplyTickRulesAsync(Delta);
+            return agent.Position;
+        }
+
+        var first = await Run(agentId);
+        var second = await Run(agentId);
+
+        Assert.Equal(first, second);
+        Assert.NotEqual(new Cell(2, 2), first); // it actually moved
+    }
+
+    [Fact]
     public async Task Stage3_lower_id_agent_wins_contested_segment_and_higher_id_holds()
     {
         var ctx = new TestContext();

@@ -36,7 +36,7 @@ export function Dashboard() {
       <div className="absolute inset-0">
         {snapshot ? (
           <SceneErrorBoundary>
-            <OperationsView snapshot={snapshot} snapSeq={state.seq} />
+            <OperationsView snapshot={snapshot} />
           </SceneErrorBoundary>
         ) : (
           <div className="flex h-full w-full items-center justify-center">

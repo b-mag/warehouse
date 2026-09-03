@@ -12,7 +12,7 @@
 
 import { OrbitControls } from "@react-three/drei";
 import { Canvas } from "@react-three/fiber";
-import { useMemo } from "react";
+import { memo, useCallback, useMemo, useRef, useState } from "react";
 
 import type { SimulationSnapshotDto } from "@/lib/contracts";
 import {
@@ -28,19 +28,27 @@ import { Zones } from "./Zones";
 
 interface OperationsViewProps {
   snapshot: SimulationSnapshotDto;
-  /** Store sequence number; bumped on each authoritative update to trigger agent snap. */
-  snapSeq: number;
 }
 
-export function OperationsView({ snapshot, snapSeq }: OperationsViewProps) {
-  const placements = useMemo(
-    () => layoutZones(snapshot.zones),
-    [snapshot.zones],
-  );
-  const lotsByZone = useMemo(
-    () => groupLotsByZone(snapshot.lots),
-    [snapshot.lots],
-  );
+/**
+ * Only the SPATIAL parts of the snapshot drive the scene. Metrics / operator-parameter / event
+ * updates arrive far more frequently (roughly every tick) but do not change what is drawn, so we
+ * memoize on the spatial array identities. The reducer keeps zones/lots/agents/starships references
+ * stable across a metrics-only update, so this prevents the scene from rebuilding — and its GPU
+ * resources from churning — dozens of times a second (which was losing the WebGL context).
+ */
+function SceneCanvas({
+  snapshot,
+  onContextLost,
+  onContextRestored,
+}: OperationsViewProps & {
+  onContextLost: () => void;
+  onContextRestored: () => void;
+}) {
+  const { zones, lots, agents, starships } = snapshot;
+
+  const placements = useMemo(() => layoutZones(zones), [zones]);
+  const lotsByZone = useMemo(() => groupLotsByZone(lots), [lots]);
 
   // Front docking edge derived from the zone grid extent.
   const edgeZ = useMemo(() => {
@@ -53,14 +61,38 @@ export function OperationsView({ snapshot, snapSeq }: OperationsViewProps) {
 
   return (
     <Canvas
-      shadows
-      dpr={[1, 2]}
+      // NOTE: shadows are intentionally OFF. Shadow maps are a heavy GPU allocation and a common
+      // trigger for "context lost" on page refresh (the previous context is not always torn down
+      // before the new one is created). The readable operations view does not need them.
+      dpr={[1, 1.5]}
       className="h-full w-full"
       // A perspective camera at a fixed tycoon-style overhead-ish angle. Perspective (not
-      // orthographic-with-negative-near) avoids the projection edge cases that flipped the
-      // view to a profile. gl defaults are fine; powerPreference hints the discrete GPU.
+      // orthographic-with-negative-near) avoids the projection edge cases that flipped the view to a
+      // profile. We do NOT request "high-performance" powerPreference: forcing a GPU switch is itself
+      // a context-loss trigger on multi-GPU machines. antialias off keeps the context lighter.
       camera={{ position: [40, 44, 46], fov: 35, near: 0.1, far: 2000 }}
-      gl={{ antialias: true, powerPreference: "high-performance" }}
+      gl={{ antialias: false, powerPreference: "default", failIfMajorPerformanceCaveat: false }}
+      onCreated={({ gl }) => {
+        const canvas = gl.domElement;
+        canvas.addEventListener(
+          "webglcontextlost",
+          (e) => {
+            // Tell the browser we intend to restore so it keeps the canvas recoverable.
+            e.preventDefault();
+            console.warn("[Forge scene] WebGL context lost — attempting restore.");
+            onContextLost();
+          },
+          false,
+        );
+        canvas.addEventListener(
+          "webglcontextrestored",
+          () => {
+            console.info("[Forge scene] WebGL context restored.");
+            onContextRestored();
+          },
+          false,
+        );
+      }}
     >
       <color attach="background" args={["#0b0f14"]} />
 
@@ -78,20 +110,67 @@ export function OperationsView({ snapshot, snapSeq }: OperationsViewProps) {
         maxDistance={220}
       />
 
-      <ambientLight intensity={0.7} />
-      <directionalLight
-        position={[30, 50, 20]}
-        intensity={1.1}
-        castShadow
-        shadow-mapSize-width={1024}
-        shadow-mapSize-height={1024}
-      />
+      <ambientLight intensity={0.8} />
+      <directionalLight position={[30, 50, 20]} intensity={1.1} />
       <hemisphereLight args={["#9fb8d6", "#20252e", 0.4]} />
 
       <Zones placements={placements} lotsByZone={lotsByZone} />
       <Lots placements={placements} lotsByZone={lotsByZone} />
-      <Agents agents={snapshot.agents} snapSeq={snapSeq} />
-      <Starships starships={snapshot.starships} edgeZ={edgeZ} />
+      <Agents agents={agents} />
+      <Starships starships={starships} edgeZ={edgeZ} />
     </Canvas>
   );
 }
+
+/**
+ * Owns active context-loss recovery. A lost WebGL context does NOT throw a React error, so an
+ * error boundary can't catch it — the canvas just goes white. When the browser fires
+ * `webglcontextlost` and does NOT follow with `webglcontextrestored` shortly after, we force a
+ * full remount of the Canvas by bumping a React key. Remounting builds a brand-new GL context
+ * from scratch, which reliably recovers even on drivers that refuse the browser's own restore.
+ */
+function OperationsViewImpl({ snapshot }: OperationsViewProps) {
+  const [canvasKey, setCanvasKey] = useState(0);
+  const restoreTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleContextLost = useCallback(() => {
+    if (restoreTimer.current) {
+      clearTimeout(restoreTimer.current);
+    }
+    // Give the browser a brief window to restore on its own; if it doesn't, force a remount.
+    restoreTimer.current = setTimeout(() => {
+      console.warn("[Forge scene] context not restored — remounting canvas.");
+      setCanvasKey((k) => k + 1);
+      restoreTimer.current = null;
+    }, 750);
+  }, []);
+
+  const handleContextRestored = useCallback(() => {
+    if (restoreTimer.current) {
+      clearTimeout(restoreTimer.current);
+      restoreTimer.current = null;
+    }
+  }, []);
+
+  return (
+    <SceneCanvas
+      key={canvasKey}
+      snapshot={snapshot}
+      onContextLost={handleContextLost}
+      onContextRestored={handleContextRestored}
+    />
+  );
+}
+
+/**
+ * Memoized so the scene only re-renders when a spatial array actually changes identity — not on the
+ * frequent metrics/parameter/event updates that share the same spatial references.
+ */
+export const OperationsView = memo(
+  OperationsViewImpl,
+  (prev, next) =>
+    prev.snapshot.zones === next.snapshot.zones &&
+    prev.snapshot.lots === next.snapshot.lots &&
+    prev.snapshot.agents === next.snapshot.agents &&
+    prev.snapshot.starships === next.snapshot.starships,
+);

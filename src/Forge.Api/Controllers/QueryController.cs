@@ -31,7 +31,18 @@ public sealed class QueryController : ControllerBase
     [ProducesResponseType(typeof(SimulationSnapshotDto), StatusCodes.Status200OK)]
     public async Task<ActionResult<SimulationSnapshotDto>> GetSnapshotAsync(CancellationToken ct)
     {
-        var snapshot = await _gateway.GetSnapshotAsync(ct).ConfigureAwait(false);
-        return Ok(snapshot);
+        try
+        {
+            var snapshot = await _gateway.GetSnapshotAsync(ct).ConfigureAwait(false);
+            return Ok(snapshot);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // The client aborted the request (page refresh, React StrictMode remount, SignalR
+            // reconnect). This is expected and benign — the read is side-effect free — so we do not
+            // surface it as a 500. 499 (client closed request) documents the cancellation without
+            // logging an error; the client simply retries.
+            return StatusCode(499);
+        }
     }
 }

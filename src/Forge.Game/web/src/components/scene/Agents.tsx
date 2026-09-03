@@ -29,11 +29,9 @@ function cellToWorld(x: number, y: number): [number, number] {
 
 interface AgentMarkerProps {
   agent: AgentDto;
-  /** Bumped whenever a fresh authoritative snapshot arrives (forces a snap). */
-  snapSeq: number;
 }
 
-function AgentMarker({ agent, snapSeq }: AgentMarkerProps) {
+function AgentMarker({ agent }: AgentMarkerProps) {
   const ref = useRef<Group>(null);
   const holdRef = useRef<Group>(null);
 
@@ -70,7 +68,7 @@ function AgentMarker({ agent, snapSeq }: AgentMarkerProps) {
     setHeld(nextHeld);
     lastAuthoritative.current = { x: agent.x, y: agent.y };
     progress.current = 0;
-  }, [snapSeq, agent.x, agent.y, agent.pathCells.length]);
+  }, [agent.x, agent.y, agent.pathCells.length]);
 
   useFrame((_, delta) => {
     const group = ref.current;
@@ -131,14 +129,13 @@ function AgentMarker({ agent, snapSeq }: AgentMarkerProps) {
 
 interface AgentsProps {
   agents: AgentDto[];
-  snapSeq: number;
 }
 
-export function Agents({ agents, snapSeq }: AgentsProps) {
+export function Agents({ agents }: AgentsProps) {
   return (
     <group>
       {agents.map((agent) => (
-        <AgentMarker key={agent.id} agent={agent} snapSeq={snapSeq} />
+        <AgentMarker key={agent.id} agent={agent} />
       ))}
     </group>
   );
