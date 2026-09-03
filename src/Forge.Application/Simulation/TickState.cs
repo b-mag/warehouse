@@ -1,4 +1,9 @@
+using System.Collections.Concurrent;
+
+using Forge.Domain.Common;
+using Forge.Domain.Gels;
 using Forge.Domain.Spatial;
+using Forge.Domain.Tasks;
 using Forge.Domain.Vessels;
 
 namespace Forge.Application.Simulation;
@@ -42,7 +47,83 @@ public sealed record TickState(
     WarehouseGrid Grid,
     IReadOnlyList<Agent> Agents,
     ReservationLedger Ledger,
-    IReadOnlyList<Starship> Starships);
+    IReadOnlyList<Starship> Starships)
+{
+    /// <summary>
+    /// The live, in-memory agent -> in-flight task link the task-execution stage maintains across ticks
+    /// (task-execution stage). An agent executing a Pick / PutAway task has an entry here from the tick it
+    /// is assigned the task until the tick it reaches the task's destination cell and the task completes;
+    /// idle (patrolling) agents have no entry. This link is intentionally NOT a domain property of
+    /// <see cref="Agent"/> (which stays a pure spatial entity) nor persisted yet — it lives with the same
+    /// in-memory provider that owns the live agents, exactly as the tick-scoped spatial state does. When
+    /// agent/task persistence lands, this moves behind the same seam with no change to the stage.
+    /// <para>Mutable by design: the task-execution stage adds links on assignment and removes them on
+    /// completion. The handler orders agents by id before iterating, so iteration is deterministic
+    /// regardless of dictionary order.</para>
+    /// </summary>
+    public ConcurrentDictionary<AgentId, WarehouseTaskId> AgentTasks { get; init; } =
+        new ConcurrentDictionary<AgentId, WarehouseTaskId>();
+
+    /// <summary>
+    /// Lots on the inbound train/conveyor that have been received but are not yet picked up
+    /// by an assigned worker (rendered later).
+    /// </summary>
+    public IReadOnlyList<GelLotId> InboundQueueLotIds { get; set; } = Array.Empty<GelLotId>();
+
+    /// <summary>
+    /// Lots currently being carried (in-transit) by agents so the renderer can hide them from
+    /// static zone rendering.
+    /// </summary>
+    public IReadOnlyList<GelLotId> InTransitLotIds { get; set; } = Array.Empty<GelLotId>();
+
+    /// <summary>
+    /// Link from a PutAway task id to the gel lot id it is meant to store, so we can attach
+    /// carrying-cubes to agents executing that task.
+    /// </summary>
+    public ConcurrentDictionary<WarehouseTaskId, GelLotId> PutAwayTaskLotLinks { get; init; } =
+        new ConcurrentDictionary<WarehouseTaskId, GelLotId>();
+
+    /// <summary>
+    /// Link from a Pick task id to the gel lot being carried outbound to a docked starship.
+    /// </summary>
+    public ConcurrentDictionary<WarehouseTaskId, GelLotId> PickTaskLotLinks { get; init; } =
+        new ConcurrentDictionary<WarehouseTaskId, GelLotId>();
+
+    /// <summary>
+    /// Engine-owned starship lifecycle (Approaching / Docked / Loading / Departing / Away).
+    /// Drives visuals and which ships may load; not derived from the long loading windows alone.
+    /// </summary>
+    public ConcurrentDictionary<StarshipId, StarshipRuntime> StarshipRuntimes { get; init; } =
+        new ConcurrentDictionary<StarshipId, StarshipRuntime>();
+}
+
+/// <summary>
+/// Per-starship runtime for the Phase-1 arrive / load / depart story.
+/// One destination colony per ship in Phase 1 (multi-stop later).
+/// </summary>
+public sealed class StarshipRuntime
+{
+    public string Phase { get; set; } = StarshipPhases.Away;
+
+    public DateTimeOffset PhaseEnteredAt { get; set; }
+
+    /// <summary>Berth index while docked/loading; -1 when away / approaching / departing.</summary>
+    public int DockIndex { get; set; } = -1;
+
+    /// <summary>Inbound pallets still to unload on this visit (0 = arrive empty / ready to load).</summary>
+    public int UnloadRemaining { get; set; }
+}
+
+/// <summary>Authoritative starship phase strings projected to clients.</summary>
+public static class StarshipPhases
+{
+    public const string Approaching = "Approaching";
+    public const string Docked = "Docked";
+    public const string Unloading = "Unloading";
+    public const string Loading = "Loading";
+    public const string Departing = "Departing";
+    public const string Away = "Away";
+}
 
 /// <summary>
 /// The seam through which <see cref="ApplyTickRulesHandler"/> reads the tick-scoped spatial/vessel
@@ -59,4 +140,17 @@ public interface ITickStateProvider
     /// the expiry-decay, order-intake, and metrics stages fully active.
     /// </summary>
     Task<TickState?> GetTickStateAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Notify the tick-scoped in-memory spatial store that a new inbound lot has been received and a
+    /// PutAway task was created for it. Used to seed the inbound train / carrying visuals.
+    /// </summary>
+    void EnqueueInboundPutAway(GelLotId lotId, WarehouseTaskId putAwayTaskId) { }
+
+    /// <summary>
+    /// Apply the current operator "workers on shift" control by adjusting the active movement
+    /// agents used by the tick stages and renderer. Implementations must preserve any in-flight
+    /// agent/task links so active tasks can still complete.
+    /// </summary>
+    void ApplyWorkerCount(int workersOnShift) { }
 }

@@ -1,6 +1,8 @@
 using Forge.Application.Simulation;
+using Forge.Domain.Gels;
 using Forge.Domain.Common;
 using Forge.Domain.Spatial;
+using Forge.Domain.Tasks;
 using Forge.Domain.Vessels;
 
 namespace Forge.Infrastructure.Adapters;
@@ -40,6 +42,15 @@ public sealed class InMemoryTickStateProvider : ITickStateProvider
     private readonly object _gate = new();
     private TickState? _state;
 
+    private int _seed;
+    private int _gridWidth = 32;
+    private int _gridHeight = 32;
+
+    // Pool of all synthesized agents. We dynamically project which agents are "active" into
+    // TickState.Agents based on the operator's WorkersOnShift control.
+    private IReadOnlyList<Agent> _agentPool = Array.Empty<Agent>();
+    private Dictionary<AgentId, int> _agentPoolIndexById = new();
+
     /// <summary>
     /// Whether an initial spatial state has been installed. Before <see cref="Initialize"/> the
     /// provider returns <see langword="null"/>, making the movement + loading stages deterministic
@@ -62,6 +73,114 @@ public sealed class InMemoryTickStateProvider : ITickStateProvider
         lock (_gate)
         {
             return Task.FromResult(_state);
+        }
+    }
+
+    /// <inheritdoc />
+    public void EnqueueInboundPutAway(GelLotId lotId, WarehouseTaskId putAwayTaskId)
+    {
+        ArgumentNullException.ThrowIfNull(lotId);
+        ArgumentNullException.ThrowIfNull(putAwayTaskId);
+
+        lock (_gate)
+        {
+            if (_state is null)
+            {
+                return;
+            }
+
+            _state.PutAwayTaskLotLinks.TryAdd(putAwayTaskId, lotId);
+
+            // Queue ordering matters for the later "train" visuals; preserve insertion order.
+            var current = _state.InboundQueueLotIds;
+            bool alreadyQueued = false;
+            for (var i = 0; i < current.Count; i++)
+            {
+                if (current[i].Equals(lotId))
+                {
+                    alreadyQueued = true;
+                    break;
+                }
+            }
+
+            if (!alreadyQueued)
+            {
+                var next = new GelLotId[current.Count + 1];
+                for (var i = 0; i < current.Count; i++)
+                {
+                    next[i] = current[i];
+                }
+                next[current.Count] = lotId;
+                _state.InboundQueueLotIds = next;
+            }
+        }
+    }
+
+    public void ApplyWorkerCount(int workersOnShift)
+    {
+        lock (_gate)
+        {
+            if (_state is null)
+            {
+                return;
+            }
+
+            // Negative values have no meaning; operator validation should prevent it anyway.
+            int desired = Math.Max(0, workersOnShift);
+
+            // Preserve any agents that have in-flight tasks; removing them would stall task completion
+            // because Phase A completion only iterates over state.Agents.
+            var inFlight = new HashSet<AgentId>(_state.AgentTasks.Keys);
+
+            var orderedPool = _agentPool.OrderBy(a => a.Id).ToArray();
+            int take = Math.Min(desired, orderedPool.Length);
+            var baseSelection = orderedPool.Take(take);
+
+            var activeIds = new HashSet<AgentId>(baseSelection.Select(a => a.Id));
+            foreach (var id in inFlight)
+            {
+                activeIds.Add(id);
+            }
+
+            var prevActiveIds = new HashSet<AgentId>(_state.Agents.Select(a => a.Id));
+
+            // Build the new active agent list. Order is irrelevant because stages order by Id, but we
+            // keep it stable for deterministic projection.
+            var nextAgents = orderedPool.Where(a => activeIds.Contains(a.Id)).ToArray();
+
+            // Spawn newly-active agents near receiving, but OFF the rail (y=2) so they are not
+            // mistaken for the train locomotive.
+            int receivingX = Math.Min(4, Math.Max(0, _gridWidth - 1));
+            int receivingY = Math.Min(2, Math.Max(0, _gridHeight - 1));
+            foreach (var agent in nextAgents)
+            {
+                if (prevActiveIds.Contains(agent.Id))
+                {
+                    continue; // already active in previous tick
+                }
+
+                if (inFlight.Contains(agent.Id))
+                {
+                    continue; // should not happen, but defensive
+                }
+
+                // Offset along the receiving strip to avoid stacks when many workers activate at once.
+                int poolIndex = _agentPoolIndexById.TryGetValue(agent.Id, out var idx) ? idx : 0;
+                int x = (receivingX + poolIndex) % Math.Max(1, _gridWidth);
+                agent.MoveTo(new Cell(x, receivingY));
+                agent.ClearPath();
+            }
+
+            var prev = _state;
+            _state = new TickState(prev.Grid, nextAgents, prev.Ledger, prev.Starships)
+            {
+                AgentTasks = prev.AgentTasks,
+                InboundQueueLotIds = prev.InboundQueueLotIds,
+                InTransitLotIds = prev.InTransitLotIds,
+                PutAwayTaskLotLinks = prev.PutAwayTaskLotLinks,
+                PickTaskLotLinks = prev.PickTaskLotLinks,
+                StarshipRuntimes = prev.StarshipRuntimes,
+            };
         }
     }
 
@@ -103,16 +222,34 @@ public sealed class InMemoryTickStateProvider : ITickStateProvider
         int gridWidth = 32,
         int gridHeight = 32,
         int agentCount = 6,
-        int starshipCount = 3)
+        int starshipCount = 3,
+        int maxAgentCount = 0)
     {
         ArgumentNullException.ThrowIfNull(destinations);
         ArgumentOutOfRangeException.ThrowIfNegative(gridWidth);
         ArgumentOutOfRangeException.ThrowIfNegative(gridHeight);
 
+        _seed = seed;
+        _gridWidth = gridWidth;
+        _gridHeight = gridHeight;
+
         // An all-aisle grid keeps every cell traversable so the demo agents can always be routed.
         var grid = new WarehouseGrid(gridWidth, gridHeight);
 
-        var agents = BuildAgents(seed, agentCount, gridWidth, gridHeight);
+        int poolCount = maxAgentCount > 0 ? maxAgentCount : agentCount;
+        poolCount = Math.Max(0, poolCount);
+
+        _agentPool = BuildAgents(seed, poolCount, gridWidth, gridHeight);
+
+        // Pre-compute a stable pool index for receiving-strip spawn offsets.
+        var orderedPool = _agentPool.OrderBy(a => a.Id).ToArray();
+        _agentPoolIndexById = orderedPool
+            .Select((a, i) => (a.Id, i))
+            .ToDictionary(t => t.Id, t => t.i);
+
+        int initialDesired = Math.Min(agentCount, orderedPool.Length);
+        var agents = orderedPool.Take(initialDesired).ToArray();
+
         var starships = BuildStarships(seed, now, destinations, starshipCount);
 
         Install(new TickState(grid, agents, new ReservationLedger(), starships));
@@ -157,14 +294,19 @@ public sealed class InMemoryTickStateProvider : ITickStateProvider
             var id = new StarshipId(DeterministicIds.Derive(seed, "starship", i));
             var destination = destinations[i % destinations.Count];
 
-            // A wide loading window straddling 'now' so the loading stage can admit loads from the start.
+            // A wide loading window so FEFO loading admission stays open while berthed.
+            // Arrive/depart visuals are driven by StarshipRuntime phases, not window length.
             var window = LoadingWindow.Create(now.AddHours(-1), now.AddHours(48));
             if (window.IsFailure)
             {
                 continue; // Defensive: the fixed offsets always yield end > start.
             }
 
-            var starship = Starship.Create(id, cargoCapacity: 500, destination, new[] { window.Value });
+            var starship = Starship.Create(
+                id,
+                cargoCapacity: VisualSimulationConstants.StarshipCargoCapacityPallets,
+                destination,
+                new[] { window.Value });
             if (starship.IsSuccess)
             {
                 starships.Add(starship.Value);

@@ -15,6 +15,7 @@ import { Canvas } from "@react-three/fiber";
 import { memo, useCallback, useMemo, useRef, useState } from "react";
 
 import type { SimulationSnapshotDto } from "@/lib/contracts";
+import { useForge } from "@/lib/ForgeProvider";
 import {
   ZONE_SIZE,
   groupLotsByZone,
@@ -23,6 +24,7 @@ import {
 
 import { Agents } from "./Agents";
 import { Lots } from "./Lots";
+import { ReceivingTrain } from "./ReceivingTrain";
 import { Starships } from "./Starships";
 import { Zones } from "./Zones";
 
@@ -46,9 +48,18 @@ function SceneCanvas({
   onContextRestored: () => void;
 }) {
   const { zones, lots, agents, starships } = snapshot;
+  const { inboundQueueLotIds, inTransitLotIds } = useForge();
+
+  const hiddenLotIds = useMemo(() => {
+    return new Set([...(inboundQueueLotIds ?? []), ...(inTransitLotIds ?? [])]);
+  }, [inboundQueueLotIds, inTransitLotIds]);
+
+  const visibleLots = useMemo(() => {
+    return lots.filter((l) => !hiddenLotIds.has(l.id));
+  }, [lots, hiddenLotIds]);
 
   const placements = useMemo(() => layoutZones(zones), [zones]);
-  const lotsByZone = useMemo(() => groupLotsByZone(lots), [lots]);
+  const lotsByZone = useMemo(() => groupLotsByZone(visibleLots), [visibleLots]);
 
   // Front docking edge derived from the zone grid extent.
   const edgeZ = useMemo(() => {
@@ -116,8 +127,14 @@ function SceneCanvas({
 
       <Zones placements={placements} lotsByZone={lotsByZone} />
       <Lots placements={placements} lotsByZone={lotsByZone} />
-      <Agents agents={agents} />
-      <Starships starships={starships} edgeZ={edgeZ} />
+      <ReceivingTrain lotIds={inboundQueueLotIds} />
+      <Agents agents={agents} simSpeed={snapshot.parameters.simSpeed} />
+      <Starships
+        starships={starships}
+        edgeZ={edgeZ}
+        openDockBays={snapshot.parameters.openDockBays}
+        simSpeed={snapshot.parameters.simSpeed}
+      />
     </Canvas>
   );
 }
@@ -172,5 +189,7 @@ export const OperationsView = memo(
     prev.snapshot.zones === next.snapshot.zones &&
     prev.snapshot.lots === next.snapshot.lots &&
     prev.snapshot.agents === next.snapshot.agents &&
-    prev.snapshot.starships === next.snapshot.starships,
+    prev.snapshot.starships === next.snapshot.starships &&
+    prev.snapshot.parameters.simSpeed === next.snapshot.parameters.simSpeed &&
+    prev.snapshot.parameters.openDockBays === next.snapshot.parameters.openDockBays,
 );

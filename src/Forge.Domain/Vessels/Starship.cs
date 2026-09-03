@@ -144,6 +144,12 @@ public sealed class Starship
     }
 
     /// <summary>
+    /// Clears cargo after a completed departure so the vessel can begin a fresh outbound trip
+    /// (Phase-1 visual recycle). Does not change destination or windows.
+    /// </summary>
+    public void ClearCargo() => LoadedQuantity = 0;
+
+    /// <summary>
     /// Pure admission helper: returns <c>true</c> when <paramref name="now"/> is inside any of the
     /// starship's loading windows using inclusive bounds (Req 13.2). Deterministic and side-effect
     /// free; consumed by the Application loading rule (task 21.1) to decide whether a load is

@@ -45,6 +45,8 @@ export interface AgentDto {
   y: number;
   pathCells: CellDto[];
   cellsPerSecond: number;
+  phase: string;
+  carryingLotId: string | null;
 }
 
 /** Mirrors Forge.Contracts.Dtos.LoadingWindowDto. */
@@ -62,6 +64,8 @@ export interface StarshipDto {
   loaded: number;
   destinationColony: string;
   windows: LoadingWindowDto[];
+  phase: string;
+  dockIndex: number;
 }
 
 /** Mirrors Forge.Contracts.Dtos.BacklogMetricsDto. */
@@ -92,6 +96,20 @@ export interface SimulationSnapshotDto {
   starships: StarshipDto[];
   metrics: BacklogMetricsDto;
   parameters: OperatorParameterStateDto;
+}
+
+/** Positions payload pushed frequently for smooth interpolation (Req 23.4). */
+export interface PositionsUpdateDto {
+  agents: AgentDto[];
+  starships: StarshipDto[];
+  inboundQueueLotIds: string[];
+  inTransitLotIds: string[];
+}
+
+/** Inventory projection for holding-area cubes / zone stored counts. */
+export interface InventoryUpdateDto {
+  zones: TemperatureZoneDto[];
+  lots: GelLotDto[];
 }
 
 /** Mirrors Forge.Contracts.OperatorParameters.OperatorParameterDto (the PUT body). */

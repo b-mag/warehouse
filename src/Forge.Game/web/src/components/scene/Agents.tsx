@@ -22,16 +22,27 @@ import type { AgentDto, CellDto } from "@/lib/contracts";
 const CELL_WORLD = 1.1;
 const MARKER_Y = 1.2;
 
+// Phase-1: InMemoryTickStateProvider synthesizes a fixed 32×32 grid (unless overridden later).
+// The visual scene (zones/lots) is centered around world origin, so we center grid-cell
+// coordinates the same way to keep walking agents aligned with rendered storage areas.
+const GRID_WIDTH_CELLS = 32;
+const GRID_HEIGHT_CELLS = 32;
+const GRID_CENTER_X = (GRID_WIDTH_CELLS - 1) / 2;
+const GRID_CENTER_Y = (GRID_HEIGHT_CELLS - 1) / 2;
+const CARRY_CUBE = 0.45;
+const CARRY_CUBE_Y = 0.55;
+
 /** Map an agent grid cell to a world-space (x, z) position centered on the origin. */
 function cellToWorld(x: number, y: number): [number, number] {
-  return [x * CELL_WORLD, y * CELL_WORLD];
+  return [(x - GRID_CENTER_X) * CELL_WORLD, (y - GRID_CENTER_Y) * CELL_WORLD];
 }
 
 interface AgentMarkerProps {
   agent: AgentDto;
+  simSpeed: number;
 }
 
-function AgentMarker({ agent }: AgentMarkerProps) {
+function AgentMarker({ agent, simSpeed }: AgentMarkerProps) {
   const ref = useRef<Group>(null);
   const holdRef = useRef<Group>(null);
 
@@ -57,17 +68,25 @@ function AgentMarker({ agent }: AgentMarkerProps) {
   const [held, setHeld] = useState(false);
   const isHeld = useRef(false);
 
+  const stallTicks = useRef(0);
+
   useEffect(() => {
-    // A new authoritative snapshot: snap position to (x, y), and detect a hold —
-    // if the authoritative cell did not change but a path still remains, the agent is
-    // being held at a reserved segment / single-occupancy resource (contention).
+    // PositionsUpdate often repeats the same cell between whole-cell engine ticks while a path
+    // remains — that is normal travel, not contention. Only mark held after several stalls.
     const prev = lastAuthoritative.current;
     const stalled = prev.x === agent.x && prev.y === agent.y;
-    const nextHeld = stalled && agent.pathCells.length > 0;
+    if (stalled && agent.pathCells.length > 0) {
+      stallTicks.current += 1;
+    } else {
+      stallTicks.current = 0;
+    }
+    const nextHeld = stallTicks.current >= 8;
     isHeld.current = nextHeld;
     setHeld(nextHeld);
     lastAuthoritative.current = { x: agent.x, y: agent.y };
-    progress.current = 0;
+    if (!stalled) {
+      progress.current = 0;
+    }
   }, [agent.x, agent.y, agent.pathCells.length]);
 
   useFrame((_, delta) => {
@@ -80,7 +99,7 @@ function AgentMarker({ agent }: AgentMarkerProps) {
     const speed = agent.cellsPerSecond > 0 ? agent.cellsPerSecond : 0;
     if (speed > 0 && path.length > 1 && !isHeld.current) {
       progress.current = Math.min(
-        progress.current + speed * delta,
+        progress.current + speed * delta * simSpeed,
         path.length - 1,
       );
     }
@@ -116,6 +135,16 @@ function AgentMarker({ agent }: AgentMarkerProps) {
           metalness={0.1}
         />
       </mesh>
+
+      {/* Inbound-train-cargo: a simple carried cube attached to the agent when it is executing
+          a PutAway task (authority sets carryingLotId). */}
+      {agent.carryingLotId ? (
+        <mesh position={[0, CARRY_CUBE_Y, 0]}>
+          <boxGeometry args={[CARRY_CUBE, CARRY_CUBE, CARRY_CUBE]} />
+          <meshStandardMaterial color="#4edc7a" roughness={0.5} metalness={0.05} />
+        </mesh>
+      ) : null}
+
       {/* Contention/hold indicator ring, shown only while the agent is held. */}
       <group ref={holdRef} visible={false} position={[0, -0.9, 0]}>
         <mesh rotation={[-Math.PI / 2, 0, 0]}>
@@ -129,13 +158,14 @@ function AgentMarker({ agent }: AgentMarkerProps) {
 
 interface AgentsProps {
   agents: AgentDto[];
+  simSpeed: number;
 }
 
-export function Agents({ agents }: AgentsProps) {
+export function Agents({ agents, simSpeed }: AgentsProps) {
   return (
     <group>
       {agents.map((agent) => (
-        <AgentMarker key={agent.id} agent={agent} />
+        <AgentMarker key={agent.id} agent={agent} simSpeed={simSpeed} />
       ))}
     </group>
   );

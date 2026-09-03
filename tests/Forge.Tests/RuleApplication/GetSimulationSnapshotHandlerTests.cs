@@ -1,3 +1,4 @@
+using Forge.Application.Abstractions;
 using Forge.Application.Abstractions.Repositories;
 using Forge.Application.Docks;
 using Forge.Application.OperatorParameters;
@@ -65,6 +66,8 @@ public sealed class GetSimulationSnapshotHandlerTests
         Assert.Equal(2, agentDto.X);
         Assert.Equal(3, agentDto.Y);
         Assert.Equal(1.5, agentDto.CellsPerSecond);
+        Assert.Equal("Active", agentDto.Phase);
+        Assert.Null(agentDto.CarryingLotId);
         Assert.Equal(2, agentDto.PathCells.Count);
         Assert.Equal(3, agentDto.PathCells[1].X);
 
@@ -74,6 +77,9 @@ public sealed class GetSimulationSnapshotHandlerTests
         Assert.Equal(500, shipDto.Capacity);
         Assert.Equal(120, shipDto.Loaded);
         Assert.Equal(starship.Destination.Value, shipDto.DestinationColony);
+        Assert.Equal("Loading", shipDto.Phase);
+        Assert.Equal(0, shipDto.DockIndex);
+        Assert.Equal(0, shipDto.DockIndex);
         Assert.Equal(window.Start, Assert.Single(shipDto.Windows).Start);
     }
 
@@ -153,11 +159,11 @@ public sealed class GetSimulationSnapshotHandlerTests
         Assert.Equal(first.Zones, second.Zones); // TemperatureZoneDto is all-scalar -> structural equality.
         Assert.Equal(first.Lots, second.Lots);   // GelLotDto is all-scalar -> structural equality.
         Assert.Equal(
-            first.Agents.Select(a => (a.Id, a.X, a.Y, a.CellsPerSecond)),
-            second.Agents.Select(a => (a.Id, a.X, a.Y, a.CellsPerSecond)));
+            first.Agents.Select(a => (a.Id, a.X, a.Y, a.CellsPerSecond, a.Phase, a.CarryingLotId)),
+            second.Agents.Select(a => (a.Id, a.X, a.Y, a.CellsPerSecond, a.Phase, a.CarryingLotId)));
         Assert.Equal(
-            first.Starships.Select(s => (s.Id, s.Capacity, s.Loaded, s.DestinationColony)),
-            second.Starships.Select(s => (s.Id, s.Capacity, s.Loaded, s.DestinationColony)));
+            first.Starships.Select(s => (s.Id, s.Capacity, s.Loaded, s.DestinationColony, s.Phase, s.DockIndex)),
+            second.Starships.Select(s => (s.Id, s.Capacity, s.Loaded, s.DestinationColony, s.Phase, s.DockIndex)));
         Assert.Equal(first.Metrics, second.Metrics);
         Assert.Equal(first.Parameters, second.Parameters);
     }
@@ -166,12 +172,29 @@ public sealed class GetSimulationSnapshotHandlerTests
 
     private sealed class TestContext
     {
+        private sealed class FakeClock : IClock
+        {
+            public FakeClock(DateTimeOffset now) => Now = now;
+
+            public DateTimeOffset Now { get; private set; }
+
+            public ClockMode Mode => ClockMode.RealTime;
+            public double AccelerationFactor => 1.0;
+
+            public void Configure(ClockMode mode, double accelerationFactor) { }
+            public void Pause() { }
+            public void Resume() { }
+
+            public TimeSpan Advance(TimeSpan wallDelta) => wallDelta;
+        }
+
         public FakeZoneRepository Zones { get; } = new();
         public FakeLotRepository Lots { get; } = new();
         public FakeTickStateProvider TickState { get; } = new();
         public WarehouseMetrics Metrics { get; } = new();
         public DockScheduler DockScheduler { get; } = new();
         public DockBayId PrimaryBay { get; } = DockBayId.New();
+        public IClock Clock { get; } = new FakeClock(Now);
         public OperatorParameterState Parameters { get; } =
             new(new OperatorParameterOptions { WorkerMax = 3, ModeledDockBays = 2 });
 
@@ -180,7 +203,7 @@ public sealed class GetSimulationSnapshotHandlerTests
         public TestContext()
         {
             Handler = new GetSimulationSnapshotHandler(
-                Zones, Lots, TickState, Metrics, DockScheduler, PrimaryBay, Parameters);
+                Zones, Lots, TickState, Clock, Metrics, DockScheduler, PrimaryBay, Parameters);
         }
 
         public TemperatureZone SeedZone(decimal minC, decimal maxC, int capacity, int stored)
@@ -204,8 +227,23 @@ public sealed class GetSimulationSnapshotHandlerTests
             return lot;
         }
 
-        public void SetTickState(IReadOnlyList<Agent> agents, IReadOnlyList<Starship> starships) =>
-            TickState.Set(new TickState(new WarehouseGrid(10, 10), agents, new ReservationLedger(), starships));
+        public void SetTickState(IReadOnlyList<Agent> agents, IReadOnlyList<Starship> starships)
+        {
+            var state = new TickState(new WarehouseGrid(10, 10), agents, new ReservationLedger(), starships);
+            var i = 0;
+            foreach (var ship in starships.OrderBy(s => s.Id))
+            {
+                state.StarshipRuntimes[ship.Id] = new StarshipRuntime
+                {
+                    Phase = StarshipPhases.Loading,
+                    PhaseEnteredAt = Now,
+                    DockIndex = i++,
+                    UnloadRemaining = 0,
+                };
+            }
+
+            TickState.Set(state);
+        }
     }
 
     private sealed class FakeZoneRepository : IZoneRepository
@@ -250,5 +288,9 @@ public sealed class GetSimulationSnapshotHandlerTests
         private TickState? _state;
         public void Set(TickState state) => _state = state;
         public Task<TickState?> GetTickStateAsync(CancellationToken ct = default) => Task.FromResult(_state);
+
+        public void ApplyWorkerCount(int workersOnShift) { }
+
+        public void EnqueueInboundPutAway(GelLotId lotId, WarehouseTaskId putAwayTaskId) { }
     }
 }

@@ -80,6 +80,9 @@ builder.Services.AddSingleton<ISimulationClientNotifier, SignalRClientNotifier>(
 builder.Services.AddSingleton<IForecastReviewStore, InMemoryForecastReviewStore>();
 // Periodically repopulate the Simulation catalog so newly-arrived lots become temperature targets.
 builder.Services.AddHostedService<CatalogRefreshService>();
+// Broadcast agent/starship positions at a fixed wall interval so the web renderer can animate.
+builder.Services.AddHostedService<PositionsUpdateHostedService>();
+builder.Services.AddHostedService<InventoryUpdateHostedService>();
 
 // ---- Transport ------------------------------------------------------------------------------
 builder.Services.AddControllers();

@@ -171,6 +171,7 @@ public sealed class RecordInboundGelReceiptHandlerTests
             Bus = new FakeEventBus();
 
             var clock = new FixedClock(Now);
+            var tickStateProvider = new FakeTickStateProvider();
             var dockScheduler = new DockScheduler();
             // A single wide inbound slot so a receipt at 'now' fits when the bay is open.
             var slot = new DockSlot(Now.AddHours(-1), Now.AddHours(1), DockOperationKind.Inbound);
@@ -186,7 +187,8 @@ public sealed class RecordInboundGelReceiptHandlerTests
                 dockScheduler,
                 Metrics,
                 Bus,
-                clock);
+                clock,
+                tickStateProvider);
         }
 
         public DockBayId BayId { get; }
@@ -196,6 +198,15 @@ public sealed class RecordInboundGelReceiptHandlerTests
         public WarehouseMetrics Metrics { get; }
         public FakeEventBus Bus { get; }
         public RecordInboundGelReceiptHandler Handler { get; }
+    }
+
+    private sealed class FakeTickStateProvider : ITickStateProvider
+    {
+        public Task<TickState?> GetTickStateAsync(CancellationToken ct = default) => Task.FromResult<TickState?>(null);
+
+        public void EnqueueInboundPutAway(GelLotId lotId, WarehouseTaskId putAwayTaskId) { }
+
+        public void ApplyWorkerCount(int workersOnShift) { }
     }
 
     private sealed class FakeGelTypeCatalog(GelType gelType) : IGelTypeCatalog

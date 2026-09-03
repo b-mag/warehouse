@@ -4,6 +4,7 @@ using Forge.Application.Abstractions.Repositories;
 using Forge.Application.Docks;
 using Forge.Application.Simulation;
 using Forge.Application.Slotting;
+using Forge.Domain.ColdChain;
 using Forge.Domain.Common;
 using Forge.Domain.Docks;
 using Forge.Domain.Events;
@@ -88,6 +89,7 @@ public sealed class RecordInboundGelReceiptHandler
     private readonly WarehouseMetrics _metrics;
     private readonly IEventBus _eventBus;
     private readonly IClock _clock;
+    private readonly ITickStateProvider _tickStateProvider;
 
     /// <summary>
     /// Construct the handler. <paramref name="slotting"/> is the active strategy (default
@@ -106,7 +108,8 @@ public sealed class RecordInboundGelReceiptHandler
         DockScheduler dockScheduler,
         WarehouseMetrics metrics,
         IEventBus eventBus,
-        IClock clock)
+        IClock clock,
+        ITickStateProvider tickStateProvider)
     {
         _gelTypes = gelTypes ?? throw new ArgumentNullException(nameof(gelTypes));
         _lots = lots ?? throw new ArgumentNullException(nameof(lots));
@@ -118,6 +121,7 @@ public sealed class RecordInboundGelReceiptHandler
         _metrics = metrics ?? throw new ArgumentNullException(nameof(metrics));
         _eventBus = eventBus ?? throw new ArgumentNullException(nameof(eventBus));
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
+        _tickStateProvider = tickStateProvider ?? throw new ArgumentNullException(nameof(tickStateProvider));
     }
 
     /// <summary>
@@ -148,7 +152,8 @@ public sealed class RecordInboundGelReceiptHandler
 
         // Expiry is derived inside GelLot.Create from the formulation's nominal shelf-life (Req 11.4);
         // the handler never computes it. The lot starts zone-less; put-away assigns storage.
-        var lot = GelLot.Create(GelLotId.New(), gelType, command.ProducedAt, command.Quantity);
+        var lotId = GelLotId.New();
+        var lot = GelLot.Create(lotId, gelType, command.ProducedAt, command.Quantity);
 
         // ---- 2. Receive at a dock bay (Req 14.1) by coordinating with the dock scheduler. ----
         // Model "received at dock" as a minimal inbound slot anchored at 'now'; the tick pipeline
@@ -193,11 +198,14 @@ public sealed class RecordInboundGelReceiptHandler
         }
 
         // ---- 5. Generate the PutAway task, stage lot + task, and commit atomically (Req 11.2, 14.1). ----
+        // Phase-1 visual unification: route the PutAway agent to the specific grid cell
+        // that corresponds to the chosen zone’s rendered center in the web scene.
+        var putAwayDestination = GridCellForZone(slotting.Zone, zones);
         var putAway = WarehouseTask.Create(
             WarehouseTaskId.New(),
             WarehouseTaskType.PutAway,
             origin: DockCell,
-            destination: DockCell,
+            destination: putAwayDestination,
             estimatedDuration: TimeSpan.Zero);
 
         if (putAway.IsFailure)
@@ -207,9 +215,21 @@ public sealed class RecordInboundGelReceiptHandler
             return putAway.Error;
         }
 
-        _lots.Add(lot);
+        // PutAway is not completed yet; hide the lot from the storage zones until the worker
+        // takes the task (train) and carries it (in-transit). But the lot's AssignedZoneId is
+        // already set so the cube can simply "unhide" when inTransit clears.
+        var storedLot = GelLot.Create(
+            lotId,
+            gelType,
+            command.ProducedAt,
+            command.Quantity,
+            assignedZoneId: slotting.Zone);
+
+        _lots.Add(storedLot);
         _tasks.Add(putAway.Value);
         await _unitOfWork.SaveChangesAsync(ct).ConfigureAwait(false);
+
+        _tickStateProvider.EnqueueInboundPutAway(lotId, putAway.Value.Id);
 
         return Result.Success();
     }
@@ -254,5 +274,50 @@ public sealed class RecordInboundGelReceiptHandler
     /// assignment flow (task 19.1); the put-away task is generated here with a zero estimated duration
     /// and origin/destination at the dock, to be refined once zone-to-cell mapping is wired.
     /// </summary>
+    // Phase-1 visual mapping constants shared with the web scene.
+    private const int GridWidthCells = 32;
+    private const int GridHeightCells = 32;
+    private const double CellWorld = 1.1;
+    private const int ZoneSizeWorld = 8;
+    private const int ZoneGapWorld = 2;
+    private const int ZonePitchWorld = ZoneSizeWorld + ZoneGapWorld; // keep in sync with web layout.ts
+
+    private static Cell GridCellForZone(ZoneId zoneId, IReadOnlyList<TemperatureZone> zones)
+    {
+        // Front-end layoutZones sorts zones by id and packs them in a near-square grid.
+        var ordered = zones.OrderBy(z => z.Id).ToArray();
+        int zoneIndex = Array.FindIndex(ordered, z => z.Id.Equals(zoneId));
+        if (zoneIndex < 0)
+        {
+            // Defensive: should not happen because slotting.Zone came from the same zone set.
+            return DockCell;
+        }
+
+        int zoneCount = ordered.Length;
+        int cols = Math.Max(1, (int)Math.Ceiling(Math.Sqrt(zoneCount)));
+        int rows = Math.Max(1, (int)Math.Ceiling((double)zoneCount / cols));
+
+        double originXWorld = (-(cols - 1) * ZonePitchWorld) / 2.0;
+        double originZWorld = (-(rows - 1) * ZonePitchWorld) / 2.0;
+
+        int col = zoneIndex % cols;
+        int row = zoneIndex / cols;
+
+        double centerXWorld = originXWorld + col * ZonePitchWorld;
+        double centerZWorld = originZWorld + row * ZonePitchWorld;
+
+        double gridCenterX = (GridWidthCells - 1) / 2.0;
+        double gridCenterY = (GridHeightCells - 1) / 2.0;
+
+        int xCell = (int)Math.Round(centerXWorld / CellWorld + gridCenterX);
+        int yCell = (int)Math.Round(centerZWorld / CellWorld + gridCenterY);
+
+        xCell = Math.Clamp(xCell, 0, GridWidthCells - 1);
+        yCell = Math.Clamp(yCell, 0, GridHeightCells - 1);
+
+        return new Cell(xCell, yCell);
+    }
+
+    // The phase-1 placeholder grid cell (origin for inbound PutAway task generation).
     private static readonly Cell DockCell = new(0, 0);
 }

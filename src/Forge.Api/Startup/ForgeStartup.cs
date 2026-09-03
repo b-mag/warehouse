@@ -101,6 +101,11 @@ public static class ForgeStartup
             }
         }
 
+        // Phase-1 visual story: the warehouse starts empty. Catalog (gel types / zones / colonies)
+        // remains, but on-hand lots and open warehouse tasks are cleared so product arrives from
+        // inbound demand rather than from a pre-filled seed dump.
+        await ResetInventoryForVisualStartAsync(context, ct).ConfigureAwait(false);
+
         // 4) Install the live demo world: register dock bays with the scheduler + install spatial state.
         var clock = services.GetRequiredService<IClock>();
         var now = clock.Now;
@@ -115,6 +120,25 @@ public static class ForgeStartup
             .ConfigureAwait(false);
 
         _ = services.GetRequiredService<SignalRStatePublisher>();
+    }
+
+    // Phase-1 visual: empty on-hand inventory so arrivals + workers fill the warehouse from demand.
+    private static async Task ResetInventoryForVisualStartAsync(ForgeDbContext context, CancellationToken ct)
+    {
+        context.GelLots.RemoveRange(context.GelLots);
+        context.WarehouseTasks.RemoveRange(context.WarehouseTasks);
+        await context.SaveChangesAsync(ct).ConfigureAwait(false);
+
+        var zones = await context.TemperatureZones.ToListAsync(ct).ConfigureAwait(false);
+        foreach (var zone in zones)
+        {
+            if (zone.StoredQuantity > 0)
+            {
+                zone.TryRemove(zone.StoredQuantity);
+            }
+        }
+
+        await context.SaveChangesAsync(ct).ConfigureAwait(false);
     }
 
     // Register the synthesized dock bays (open) with the dock scheduler so inbound receipts can be
@@ -146,7 +170,19 @@ public static class ForgeStartup
 
         var destinations = colonies.Select(c => c.Id).OrderBy(id => id).ToArray();
 
+        // Spawn one moving agent per worker on shift so the WORKERS-ON-SHIFT operator control governs
+        // the size of the visible workforce and how fast the task backlog drains. Clamped to at least a
+        // few agents so the demo is never motionless even if the workforce is configured very low.
+        var parameters = services.GetRequiredService<Application.OperatorParameters.OperatorParameterState>();
+        int activeAgentCount = Math.Max(3, parameters.WorkersOnShift);
+        int poolAgentCount = Math.Max(3, parameters.WorkerMax);
+
         services.GetRequiredService<InMemoryTickStateProvider>()
-            .Initialize(options.Seed, now, destinations);
+            .Initialize(
+                options.Seed,
+                now,
+                destinations,
+                agentCount: activeAgentCount,
+                maxAgentCount: poolAgentCount);
     }
 }

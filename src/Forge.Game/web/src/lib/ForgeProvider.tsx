@@ -35,8 +35,10 @@ import type {
   BacklogChangedEvent,
   BlockedArrivalEvent,
   BlockedPlacementEvent,
+  InventoryUpdateDto,
   LotExpiredEvent,
   OperatorParameterChangedEvent,
+  PositionsUpdateDto,
   SimulationSnapshotDto,
   TemperatureExcursionEvent,
 } from "./contracts";
@@ -59,6 +61,8 @@ const ForgeContext = createContext<ForgeContextValue | null>(null);
  */
 const HUB_METHODS = {
   Snapshot: "Snapshot",
+  PositionsUpdate: "PositionsUpdate",
+  InventoryUpdate: "InventoryUpdate",
   LotExpired: "LotExpired",
   TemperatureExcursion: "TemperatureExcursion",
   BlockedArrival: "BlockedArrival",
@@ -107,6 +111,18 @@ export function ForgeProvider({ children }: { children: ReactNode }) {
     connection.on(HUB_METHODS.Snapshot, (snapshot: SimulationSnapshotDto) => {
       dispatch({ type: "SNAPSHOT", snapshot });
     });
+    connection.on(
+      HUB_METHODS.PositionsUpdate,
+      (update: PositionsUpdateDto) => {
+        dispatch({ type: "POSITIONS_UPDATE", update });
+      },
+    );
+    connection.on(
+      HUB_METHODS.InventoryUpdate,
+      (update: InventoryUpdateDto) => {
+        dispatch({ type: "INVENTORY_UPDATE", update });
+      },
+    );
     connection.on(HUB_METHODS.LotExpired, (event: LotExpiredEvent) => {
       dispatch({ type: "LOT_EXPIRED", event });
     });

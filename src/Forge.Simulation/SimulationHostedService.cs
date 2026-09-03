@@ -1,4 +1,5 @@
 using Forge.Application.Abstractions;
+using Forge.Application.OperatorParameters;
 using Forge.Simulation.Arrivals;
 using Forge.Simulation.Clock;
 using Forge.Simulation.Demand;
@@ -49,6 +50,7 @@ public sealed class SimulationHostedService : BackgroundService
     private readonly TemperatureReadingGenerator _temperature;
     private readonly ISimulationCatalogProvider _catalog;
     private readonly SimulationDriverOptions _options;
+    private readonly OperatorParameterState _operatorParameters;
     private readonly Func<DateTimeOffset> _wallClock;
 
     // The wall-clock instant of the previous iteration; the delta between it and "now" is what the
@@ -79,6 +81,7 @@ public sealed class SimulationHostedService : BackgroundService
         TemperatureReadingGenerator temperature,
         ISimulationCatalogProvider catalog,
         SimulationDriverOptions options,
+        OperatorParameterState operatorParameters,
         Func<DateTimeOffset>? wallClock = null)
     {
         ArgumentNullException.ThrowIfNull(clock);
@@ -96,6 +99,7 @@ public sealed class SimulationHostedService : BackgroundService
         _temperature = temperature;
         _catalog = catalog;
         _options = options;
+        _operatorParameters = operatorParameters ?? throw new ArgumentNullException(nameof(operatorParameters));
         _wallClock = wallClock ?? (() => DateTimeOffset.UtcNow);
     }
 
@@ -173,7 +177,7 @@ public sealed class SimulationHostedService : BackgroundService
     private async Task GenerateInputsAsync(DateTimeOffset windowStart, TimeSpan simDelta, CancellationToken ct)
     {
         // Inbound arrivals at the current operator arrival rate (Req 11.1, 20.5).
-        _arrivals.ArrivalRatePerHour = _options.InitialArrivalRatePerHour;
+        _arrivals.ArrivalRatePerHour = _operatorParameters.InboundRate;
         if (_catalog.GelTypes.Count > 0 && _catalog.DockBays.Count > 0)
         {
             await _arrivals.GenerateAsync(windowStart, simDelta, ct).ConfigureAwait(false);
@@ -184,7 +188,12 @@ public sealed class SimulationHostedService : BackgroundService
         if (_catalog.Colonies.Count > 0)
         {
             await _demand
-                .GenerateAsync(_catalog.Colonies, windowStart, simDelta, _options.DemandMultiplier, ct)
+                .GenerateAsync(
+                    _catalog.Colonies,
+                    windowStart,
+                    simDelta,
+                    _operatorParameters.DemandMultiplier,
+                    ct)
                 .ConfigureAwait(false);
         }
 

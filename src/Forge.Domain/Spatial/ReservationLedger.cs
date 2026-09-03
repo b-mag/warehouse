@@ -121,6 +121,15 @@ public sealed class ReservationLedger
     }
 
     /// <summary>
+    /// Drop <b>all</b> reservations held by every agent, resetting the ledger to empty. Reservations
+    /// are intra-tick coordination only — they exist to stop two agents occupying the same path segment
+    /// during a single tick's movement — so the tick pipeline clears the ledger at the start of each
+    /// movement pass. Without this the ledger would accumulate every agent's segments across every tick
+    /// unboundedly, degrading the conflict scan and eventually causing spurious cross-tick contention.
+    /// </summary>
+    public void Clear() => _bySegment.Clear();
+
+    /// <summary>
     /// Drop every reservation held by <paramref name="agent"/> (Req 19.2 release path).
     /// Segments left with no reservations are removed from the map so the ledger stays
     /// compact and iteration order stays stable. Returns the number of reservations removed.

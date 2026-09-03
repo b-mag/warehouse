@@ -152,6 +152,7 @@ public static class ForgeInfrastructureDependencyInjection
             sp.GetRequiredService<IZoneRepository>(),
             sp.GetRequiredService<IGelLotRepository>(),
             sp.GetRequiredService<ITickStateProvider>(),
+            sp.GetRequiredService<IClock>(),
             sp.GetRequiredService<WarehouseMetrics>(),
             sp.GetRequiredService<DockScheduler>(),
             primaryDockBay,

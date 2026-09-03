@@ -24,7 +24,7 @@ namespace Forge.Application.Simulation;
 /// persistence, and publication.
 /// </para>
 /// </summary>
-internal static class TickStages
+internal static partial class TickStages
 {
     /// <summary>
     /// <b>Stage 1 — Expiry decay (Req 4).</b> For each supplied lot, ordered by <see cref="GelLot.Id"/>
@@ -117,16 +117,28 @@ internal static class TickStages
             return events;
         }
 
+        // Reservations are intra-tick coordination only (they stop two agents sharing a segment DURING
+        // this tick). Clear the ledger at the start of each movement pass so it does not accumulate every
+        // agent's segments across every tick — unbounded growth that slows the conflict scan and can
+        // cause spurious cross-tick contention that freezes agents in place.
+        state.Ledger.Clear();
+
         foreach (var agent in Ordered(state.Agents, a => a.Id))
         {
             var path = agent.CurrentPath;
 
-            // Dispatch: an idle agent (no path, or standing on its path's destination) is handed a
-            // fresh destination and routed there, so the warehouse stays visibly in motion. The
+            // Agents that are executing a task (they hold an entry in the agent->task link) must NOT be
+            // patrol-dispatched: they follow the path the task-execution stage assigned toward their
+            // task's work cell, and once they arrive they HOLD position so the task-execution stage can
+            // detect arrival and complete the task next. Overwriting their path with a patrol route here
+            // was making task-bound agents wander and never complete (backlog never drained).
+            bool hasTask = state.AgentTasks.ContainsKey(agent.Id);
+
+            // Dispatch: an idle, TASKLESS agent (no path, or standing on its path's destination) is handed
+            // a fresh patrol destination and routed there so the warehouse stays visibly in motion. The
             // destination is a deterministic function of the agent id + its current cell, so identical
-            // state reproduces identical dispatch (Req 19.6). This is Phase-1 "keep agents working"
-            // routing; tying each trip to a specific Pick/PutAway task is a later step.
-            if (path is null || path.StepCount == 0 || agent.Position == path.Cells[^1])
+            // state reproduces identical dispatch (Req 19.6).
+            if (!hasTask && (path is null || path.StepCount == 0 || agent.Position == path.Cells[^1]))
             {
                 var target = NextDestination(state.Grid, agent);
                 if (target is not { } dest || dest == agent.Position)
@@ -202,6 +214,285 @@ internal static class TickStages
         }
 
         return events;
+    }
+
+    /// <summary>
+    /// <b>Task-execution stage — make agents actually work the backlog.</b> Assigns queued/created
+    /// <see cref="WarehouseTaskType.PutAway"/> and <see cref="WarehouseTaskType.Pick"/> tasks to idle
+    /// agents, routes each assigned agent to its task's destination cell, and completes a task when its
+    /// agent has arrived — draining the receiving (PutAway) / outbound (Pick) backlog over time.
+    /// <para>
+    /// This is what turns the WORKERS-ON-SHIFT and ARRIVAL-RATE operator controls into a real feedback
+    /// loop: more agents assigned in parallel drain the backlog faster; a higher arrival rate refills it.
+    /// The agent-&gt;task link lives in <see cref="TickState.AgentTasks"/> (in-memory, tick-scoped) so an
+    /// agent stays bound to its task across ticks until it arrives.
+    /// </para>
+    /// <para><b>Determinism (Req 19.6).</b> Agents are processed in ascending <see cref="Agent.Id"/> order
+    /// and unassigned tasks in ascending <see cref="WarehouseTask.Id"/> order, so the same
+    /// <c>(agents, tasks, positions)</c> always produces the same assignments and completions. No clock,
+    /// no RNG. A non-positive <paramref name="delta"/> is a no-op (Req 10.4).</para>
+    /// <para><b>Boundary.</b> The stage generates no tasks (that is the driver / order + inbound handlers'
+    /// job — Req 1.8); it only advances the lifecycle of tasks that already exist and moves agents that
+    /// already exist. Task status/assignment mutations go through the guarded domain transitions on
+    /// <see cref="WarehouseTask"/>; the caller stages the mutated tasks for the atomic unit-of-work commit
+    /// and publishes the returned completion events after the commit succeeds.</para>
+    /// </summary>
+    /// <param name="state">The tick state: agents, grid, and the live agent-&gt;task link map.</param>
+    /// <param name="unassigned">Tasks awaiting assignment (created/queued), from the task repository.</param>
+    /// <param name="tasksById">Resolver for a task by id (to complete an agent's in-flight task).</param>
+    /// <param name="planner">The deterministic path planner used to route an agent to its task.</param>
+    /// <param name="maxActiveAgents">
+    /// Upper bound on how many agents may hold a task at once — driven by WORKERS ON SHIFT so the operator
+    /// control governs parallelism. A non-positive value means "no cap".
+    /// </param>
+    /// <param name="now">The current simulated time (stamped on completion events).</param>
+    /// <param name="delta">The tick duration; non-positive is a no-op.</param>
+    /// <param name="mutatedTasks">Receives tasks whose state changed this tick (assigned/started/completed).</param>
+    /// <param name="mutatedAgents">Receives agents given a fresh path toward a newly assigned task.</param>
+    /// <returns>The completed-task outcome: the <see cref="TaskCompleted"/> events plus per-type counts.</returns>
+    public static TaskExecutionOutcome TaskExecution(
+        TickState state,
+        IReadOnlyList<WarehouseTask> unassigned,
+        Func<WarehouseTaskId, WarehouseTask?> tasksById,
+        IPathPlanner planner,
+        int maxActiveAgents,
+        DateTimeOffset now,
+        TimeSpan delta,
+        List<WarehouseTask> mutatedTasks,
+        List<Agent> mutatedAgents)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        ArgumentNullException.ThrowIfNull(unassigned);
+        ArgumentNullException.ThrowIfNull(tasksById);
+        ArgumentNullException.ThrowIfNull(planner);
+        ArgumentNullException.ThrowIfNull(mutatedTasks);
+        ArgumentNullException.ThrowIfNull(mutatedAgents);
+
+        var events = new List<IDomainEvent>();
+        int putAwayCompleted = 0;
+        int pickCompleted = 0;
+        int assigned = 0;
+        int skippedUnroutable = 0;
+        int skippedAssignFailed = 0;
+        int inFlightNotArrived = 0;
+        var completedPutAwayLots = new List<GelLotId>();
+
+        if (delta <= TimeSpan.Zero)
+        {
+            return new TaskExecutionOutcome(
+                events, putAwayCompleted, pickCompleted, 0, 0, 0, 0, 0, completedPutAwayLots);
+        }
+
+        var link = state.AgentTasks;
+        var agents = Ordered(state.Agents, a => a.Id);
+
+        // ---- Phase A: complete in-flight tasks whose agent has reached the destination cell. ----
+        foreach (var agent in agents)
+        {
+            if (!link.TryGetValue(agent.Id, out var taskId))
+            {
+                continue;
+            }
+
+            var task = tasksById(taskId);
+            if (task is null || task.Status == Forge.Domain.Tasks.TaskStatus.Completed)
+            {
+                // The task vanished or is already done — release the agent so it can take new work.
+                link.TryRemove(agent.Id, out _);
+                agent.ClearPath();
+                continue;
+            }
+
+            var workCell = WorkCellFor(state.Grid, task);
+            if (agent.Position != workCell)
+            {
+                inFlightNotArrived++;
+                continue; // still travelling; AgentMovement advances it toward the work cell.
+            }
+
+            // Arrived: drive the guarded transition to completion. Start() first if still Assigned.
+            if (task.Status == Forge.Domain.Tasks.TaskStatus.Assigned)
+            {
+                task.Start();
+            }
+
+            if (task.Status == Forge.Domain.Tasks.TaskStatus.InProgress && task.Complete().IsSuccess)
+            {
+                mutatedTasks.Add(task);
+                events.Add(new TaskCompleted(task.Id, agent.Worker, 0m, now));
+                if (task.Type == WarehouseTaskType.PutAway)
+                {
+                    putAwayCompleted++;
+
+                    // Inbound-train-cargo: once the PutAway finishes, the carried cube should
+                    // appear in the storage zones (renderer hides lots while inTransit).
+                    if (state.PutAwayTaskLotLinks.TryGetValue(task.Id, out var lotId))
+                    {
+                        completedPutAwayLots.Add(lotId);
+
+                        var transit = state.InTransitLotIds;
+                        int nextCount = 0;
+                        for (var i = 0; i < transit.Count; i++)
+                        {
+                            if (!transit[i].Equals(lotId))
+                            {
+                                nextCount++;
+                            }
+                        }
+
+                        if (nextCount != transit.Count)
+                        {
+                            var next = new GelLotId[nextCount];
+                            int k = 0;
+                            for (var i = 0; i < transit.Count; i++)
+                            {
+                                var id = transit[i];
+                                if (!id.Equals(lotId))
+                                {
+                                    next[k++] = id;
+                                }
+                            }
+                            state.InTransitLotIds = next;
+                        }
+                    }
+                }
+                else if (task.Type == WarehouseTaskType.Pick)
+                {
+                    pickCompleted++;
+
+                    // Outbound: deliver one pallet onto a Loading starship at an open berth.
+                    foreach (var ship in Ordered(state.Starships, s => s.Id))
+                    {
+                        if (!CanLoadStarship(state, ship) || ship.RemainingCapacity <= 0)
+                        {
+                            continue;
+                        }
+
+                        if (ship.TryLoad(VisualSimulationConstants.MaxPalletsLoadedPerTick).IsSuccess)
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Whether completed or rejected, release the agent + link so it can be re-dispatched.
+            link.TryRemove(agent.Id, out _);
+            agent.ClearPath();
+        }
+
+        // ---- Phase B: assign fresh work to idle agents, up to the active cap. ----
+        // Only PutAway / Pick tasks are executed here (the movement-based work); Load/CycleCount/TempCheck
+        // are handled by other stages or are out of scope for agent travel.
+        var queue = new Queue<WarehouseTask>(
+            Ordered(unassigned, t => t.Id)
+                .Where(t => t.Type is WarehouseTaskType.PutAway or WarehouseTaskType.Pick));
+
+        foreach (var agent in agents)
+        {
+            if (queue.Count == 0)
+            {
+                break;
+            }
+
+            if (link.ContainsKey(agent.Id))
+            {
+                continue; // already executing a task
+            }
+
+            if (maxActiveAgents > 0 && link.Count >= maxActiveAgents)
+            {
+                break; // operator's WORKERS-ON-SHIFT cap reached for this tick
+            }
+
+            var task = queue.Dequeue();
+
+            // Route the agent to the task's effective work cell; skip (leave task queued) if unroutable.
+            var workCell = WorkCellFor(state.Grid, task);
+            var plan = planner.Plan(state.Grid, agent.Position, workCell);
+            if (plan.IsUnroutable)
+            {
+                skippedUnroutable++;
+                continue;
+            }
+
+            // Guarded assignment: Created/Queued -> Assigned. Reject leaves the task untouched.
+            if (task.AssignTo(agent.Worker).IsFailure)
+            {
+                skippedAssignFailed++;
+                continue;
+            }
+
+            agent.AssignPath(plan.Path);
+            link[agent.Id] = task.Id;
+
+            // Inbound-train-cargo: when a worker takes a PutAway task, the associated inbound
+            // lot leaves the train and becomes "carried" (renderer hides it from the static
+            // storage zones while in transit).
+            if (task.Type == WarehouseTaskType.PutAway)
+            {
+                if (state.PutAwayTaskLotLinks.TryGetValue(task.Id, out var lotId))
+                {
+                    // Remove from inbound queue.
+                    var inboundQueue = state.InboundQueueLotIds;
+                    int nextQueueCount = 0;
+                    for (var i = 0; i < inboundQueue.Count; i++)
+                    {
+                        if (!inboundQueue[i].Equals(lotId))
+                        {
+                            nextQueueCount++;
+                        }
+                    }
+
+                    if (nextQueueCount != inboundQueue.Count)
+                    {
+                        var nextQueue = new GelLotId[nextQueueCount];
+                        int k = 0;
+                        for (var i = 0; i < inboundQueue.Count; i++)
+                        {
+                            var id = inboundQueue[i];
+                            if (!id.Equals(lotId))
+                            {
+                                nextQueue[k++] = id;
+                            }
+                        }
+                        state.InboundQueueLotIds = nextQueue;
+                    }
+
+                    // Add to in-transit set (as an ordered list for rendering).
+                    var transit = state.InTransitLotIds;
+                    bool alreadyInTransit = false;
+                    for (var i = 0; i < transit.Count; i++)
+                    {
+                        if (transit[i].Equals(lotId))
+                        {
+                            alreadyInTransit = true;
+                            break;
+                        }
+                    }
+
+                    if (!alreadyInTransit)
+                    {
+                        var nextTransit = new GelLotId[transit.Count + 1];
+                        for (var i = 0; i < transit.Count; i++)
+                        {
+                            nextTransit[i] = transit[i];
+                        }
+                        nextTransit[transit.Count] = lotId;
+                        state.InTransitLotIds = nextTransit;
+                    }
+                }
+            }
+
+            mutatedTasks.Add(task);
+            mutatedAgents.Add(agent);
+            assigned++;
+        }
+
+        return new TaskExecutionOutcome(
+            events, putAwayCompleted, pickCompleted,
+            assigned, skippedUnroutable, skippedAssignFailed, inFlightNotArrived, queue.Count,
+            completedPutAwayLots);
     }
 
     /// <summary>
@@ -354,6 +645,63 @@ internal static class TickStages
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// The effective grid work cell an agent travels to for <paramref name="task"/>.
+    /// <para>
+    /// Phase-1 tasks may carry a degenerate dock placeholder origin/destination (until full
+    /// zone-to-cell persistence exists). When that placeholder is detected, we map it into a
+    /// deterministic task-type-specific region of the grid so workers still move toward meaningful
+    /// receiving/storage areas instead of collapsing onto a single cell. A task that already carries
+    /// a real in-bounds destination is honoured as-is. Pure and reproducible: identical (grid, task id)
+    /// always yields the identical cell (Req 19.6).
+    /// </para>
+    /// </summary>
+    private static Cell WorkCellFor(WarehouseGrid grid, WarehouseTask task)
+    {
+        if (grid.Width <= 0 || grid.Height <= 0)
+        {
+            return task.Destination;
+        }
+
+        var dest = task.Destination;
+        bool inBounds = dest.X >= 0 && dest.X < grid.Width && dest.Y >= 0 && dest.Y < grid.Height;
+        bool degenerate = dest is { X: 0, Y: 0 }; // the placeholder dock cell
+
+        if (inBounds && !degenerate)
+        {
+            return dest;
+        }
+
+        // Phase-1: tasks are still created with a degenerate dock placeholder cell for origin /
+        // destination. For visual unification, map that placeholder into a task-type specific,
+        // deterministic region of the grid instead of spraying across the entire floor.
+        uint fold = StableGuidFold(task.Id.Value);
+
+        if (degenerate && task.Type == WarehouseTaskType.PutAway)
+        {
+            // Receiving rail: low-Y edge, left side (matches ReceivingTrain placement).
+            int x = Math.Min(2, Math.Max(0, grid.Width - 1));
+            int y = 0;
+            return new Cell(x, y);
+        }
+
+        if (degenerate && task.Type == WarehouseTaskType.Pick)
+        {
+            // Ship dock edge: high-Y berths — workers walk cargo out to terminals.
+            int berthCount = Math.Max(1, Math.Min(4, grid.Width / 6));
+            int berth = (int)(fold % (uint)berthCount);
+            int spacing = Math.Max(1, grid.Width / (berthCount + 1));
+            int x = Math.Clamp(spacing * (berth + 1), 0, grid.Width - 1);
+            int y = grid.Height > 0 ? grid.Height - 1 : 0;
+            return new Cell(x, y);
+        }
+
+        // Fallback: deterministic in-bounds cell.
+        int fx = (int)(fold % (uint)grid.Width);
+        int fy = (int)((fold / (uint)grid.Width) % (uint)grid.Height);
+        return new Cell(fx, fy);
     }
 
     /// <summary>

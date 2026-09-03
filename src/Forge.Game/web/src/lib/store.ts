@@ -14,8 +14,10 @@
 
 import type {
   BacklogChangedEvent,
+  InventoryUpdateDto,
   LotExpiredEvent,
   OperatorParameterChangedEvent,
+  PositionsUpdateDto,
   SimulationSnapshotDto,
   TemperatureExcursionEvent,
 } from "./contracts";
@@ -40,6 +42,10 @@ export interface ForgeState {
   status: ConnectionStatus;
   /** Last authoritative full-state snapshot, or null until first received. */
   snapshot: SimulationSnapshotDto | null;
+  /** Lot ids currently on the inbound train/conveyor (rendered later). */
+  inboundQueueLotIds: string[];
+  /** Lot ids currently being carried/in-transit (used to hide from static rendering later). */
+  inTransitLotIds: string[];
   /** Most recent engine events (newest first), capped for the HUD. */
   events: EventLogEntry[];
   /** Last error surfaced from the Api or hub, cleared on success. */
@@ -51,6 +57,8 @@ export interface ForgeState {
 export const initialForgeState: ForgeState = {
   status: "connecting",
   snapshot: null,
+  inboundQueueLotIds: [],
+  inTransitLotIds: [],
   events: [],
   lastError: null,
   seq: 0,
@@ -61,6 +69,8 @@ const MAX_EVENTS = 100;
 export type ForgeAction =
   | { type: "STATUS"; status: ConnectionStatus }
   | { type: "SNAPSHOT"; snapshot: SimulationSnapshotDto }
+  | { type: "POSITIONS_UPDATE"; update: PositionsUpdateDto }
+  | { type: "INVENTORY_UPDATE"; update: InventoryUpdateDto }
   | { type: "LOT_EXPIRED"; event: LotExpiredEvent }
   | { type: "TEMPERATURE_EXCURSION"; event: TemperatureExcursionEvent }
   | { type: "BACKLOG_CHANGED"; event: BacklogChangedEvent }
@@ -99,6 +109,47 @@ export function forgeReducer(
         lastError: null,
         seq: state.seq + 1,
       };
+
+    case "POSITIONS_UPDATE": {
+      // Replace only the moving entities. Zones/lots remain authoritative through the last snapshot
+      // / inventory update.
+      if (!state.snapshot) {
+        return {
+          ...state,
+          inboundQueueLotIds: action.update.inboundQueueLotIds,
+          inTransitLotIds: action.update.inTransitLotIds,
+          seq: state.seq + 1,
+        };
+      }
+
+      return {
+        ...state,
+        snapshot: {
+          ...state.snapshot,
+          agents: action.update.agents,
+          starships: action.update.starships,
+        },
+        inboundQueueLotIds: action.update.inboundQueueLotIds,
+        inTransitLotIds: action.update.inTransitLotIds,
+        seq: state.seq + 1,
+      };
+    }
+
+    case "INVENTORY_UPDATE": {
+      if (!state.snapshot) {
+        return { ...state, seq: state.seq + 1 };
+      }
+
+      return {
+        ...state,
+        snapshot: {
+          ...state.snapshot,
+          zones: action.update.zones,
+          lots: action.update.lots,
+        },
+        seq: state.seq + 1,
+      };
+    }
 
     case "LOT_EXPIRED": {
       const events = pushEvent(
