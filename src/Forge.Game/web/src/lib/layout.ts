@@ -5,6 +5,8 @@
  * stable grid derived purely from their order/id. This is a presentation concern only
  * — it invents no business state, just where to draw an authoritative entity. Agent
  * coordinates, by contrast, ARE authoritative (AgentDto.x/y) and are used as-is.
+ *
+ * Keep numeric constants aligned with Forge.Application.Simulation.VisualGridLayout.
  */
 
 import type {
@@ -17,6 +19,25 @@ import type {
 export const ZONE_SIZE = 8;
 export const ZONE_GAP = 2;
 export const ZONE_PITCH = ZONE_SIZE + ZONE_GAP;
+
+/** Agent / rail grid (matches InMemoryTickStateProvider). */
+export const GRID_WIDTH_CELLS = 32;
+export const GRID_HEIGHT_CELLS = 32;
+export const CELL_WORLD = 1.1;
+export const FLOOR_TOP = 0.4;
+
+export const GRID_CENTER_X = (GRID_WIDTH_CELLS - 1) / 2;
+export const GRID_CENTER_Y = (GRID_HEIGHT_CELLS - 1) / 2;
+
+/** Idle breakroom cells (crew wait here between tasks). */
+export const IDLE_BAY = { minX: 22, maxX: 28, minY: 2, maxY: 5 } as const;
+
+/** Maglev rail row. */
+export const RAIL_Y = 0;
+
+export function cellToWorld(x: number, y: number): [number, number] {
+  return [(x - GRID_CENTER_X) * CELL_WORLD, (y - GRID_CENTER_Y) * CELL_WORLD];
+}
 
 /** A zone's computed floor placement in world space. */
 export interface ZonePlacement {
@@ -52,6 +73,53 @@ export function layoutZones(zones: TemperatureZoneDto[]): ZonePlacement[] {
       centerZ: originZ + row * ZONE_PITCH,
     };
   });
+}
+
+/** Warehouse slab that borders the train rail and ship terminal pads. */
+export function warehouseFloorBounds(
+  placements: ZonePlacement[],
+  openDockBays: number,
+): { centerX: number; centerZ: number; width: number; depth: number } {
+  const [railX0, railZ] = cellToWorld(0, RAIL_Y);
+
+  let minX = railX0;
+  let maxX = cellToWorld(GRID_WIDTH_CELLS - 1, RAIL_Y)[0];
+  let minZ = railZ - 2.2;
+  let maxZ = railZ + 2.2;
+
+  for (const p of placements) {
+    minX = Math.min(minX, p.centerX - ZONE_SIZE / 2 - 1);
+    maxX = Math.max(maxX, p.centerX + ZONE_SIZE / 2 + 1);
+    minZ = Math.min(minZ, p.centerZ - ZONE_SIZE / 2 - 1);
+    maxZ = Math.max(maxZ, p.centerZ + ZONE_SIZE / 2 + 1);
+  }
+
+  // Ship terminal pads sit on the high-Z edge.
+  const shipEdgeZ =
+    placements.reduce((m, p) => Math.max(m, p.centerZ), 0) + ZONE_SIZE * 1.5;
+  const bayCount = Math.max(1, openDockBays);
+  const spacing = 6;
+  const padW = 5;
+  const padD = 4;
+  const originX = (-(bayCount - 1) * spacing) / 2;
+  minX = Math.min(minX, originX - padW / 2 - 1);
+  maxX = Math.max(maxX, originX + (bayCount - 1) * spacing + padW / 2 + 1);
+  maxZ = Math.max(maxZ, shipEdgeZ + padD + 1.5);
+
+  // Breakroom footprint.
+  const [bayX0, bayZ0] = cellToWorld(IDLE_BAY.minX, IDLE_BAY.minY);
+  const [bayX1, bayZ1] = cellToWorld(IDLE_BAY.maxX, IDLE_BAY.maxY);
+  minX = Math.min(minX, bayX0 - 1, bayX1 - 1);
+  maxX = Math.max(maxX, bayX0 + 1, bayX1 + 1);
+  minZ = Math.min(minZ, bayZ0 - 1, bayZ1 - 1);
+  maxZ = Math.max(maxZ, bayZ0 + 1, bayZ1 + 1);
+
+  return {
+    centerX: (minX + maxX) / 2,
+    centerZ: (minZ + maxZ) / 2,
+    width: maxX - minX,
+    depth: maxZ - minZ,
+  };
 }
 
 /** Temperature band classification used only to tint zone floors for readability. */

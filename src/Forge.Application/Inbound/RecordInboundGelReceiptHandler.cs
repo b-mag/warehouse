@@ -269,19 +269,9 @@ public sealed class RecordInboundGelReceiptHandler
     }
 
     /// <summary>
-    /// The grid cell a put-away originates/terminates at for this Phase-1 modeling. A full path plan
-    /// (dock cell → chosen zone cell) that derives the task's travel time is applied later by the
-    /// assignment flow (task 19.1); the put-away task is generated here with a zero estimated duration
-    /// and origin/destination at the dock, to be refined once zone-to-cell mapping is wired.
+    /// The grid cell a put-away terminates at (zone aisle face). Must stay aligned with
+    /// <see cref="VisualGridLayout"/> / the web zone layout.
     /// </summary>
-    // Phase-1 visual mapping constants shared with the web scene.
-    private const int GridWidthCells = 32;
-    private const int GridHeightCells = 32;
-    private const double CellWorld = 1.1;
-    private const int ZoneSizeWorld = 8;
-    private const int ZoneGapWorld = 2;
-    private const int ZonePitchWorld = ZoneSizeWorld + ZoneGapWorld; // keep in sync with web layout.ts
-
     private static Cell GridCellForZone(ZoneId zoneId, IReadOnlyList<TemperatureZone> zones)
     {
         // Front-end layoutZones sorts zones by id and packs them in a near-square grid.
@@ -289,33 +279,15 @@ public sealed class RecordInboundGelReceiptHandler
         int zoneIndex = Array.FindIndex(ordered, z => z.Id.Equals(zoneId));
         if (zoneIndex < 0)
         {
-            // Defensive: should not happen because slotting.Zone came from the same zone set.
             return DockCell;
         }
 
         int zoneCount = ordered.Length;
-        int cols = Math.Max(1, (int)Math.Ceiling(Math.Sqrt(zoneCount)));
-        int rows = Math.Max(1, (int)Math.Ceiling((double)zoneCount / cols));
-
-        double originXWorld = (-(cols - 1) * ZonePitchWorld) / 2.0;
-        double originZWorld = (-(rows - 1) * ZonePitchWorld) / 2.0;
-
-        int col = zoneIndex % cols;
-        int row = zoneIndex / cols;
-
-        double centerXWorld = originXWorld + col * ZonePitchWorld;
-        double centerZWorld = originZWorld + row * ZonePitchWorld;
-
-        double gridCenterX = (GridWidthCells - 1) / 2.0;
-        double gridCenterY = (GridHeightCells - 1) / 2.0;
-
-        int xCell = (int)Math.Round(centerXWorld / CellWorld + gridCenterX);
-        int yCell = (int)Math.Round(centerZWorld / CellWorld + gridCenterY);
-
-        xCell = Math.Clamp(xCell, 0, GridWidthCells - 1);
-        yCell = Math.Clamp(yCell, 0, GridHeightCells - 1);
-
-        return new Cell(xCell, yCell);
+        var blocked = VisualGridLayout.BuildZoneBlockedCells(
+            zoneCount, VisualGridLayout.GridWidthCells, VisualGridLayout.GridHeightCells);
+        var grid = new WarehouseGrid(
+            VisualGridLayout.GridWidthCells, VisualGridLayout.GridHeightCells, blocked);
+        return VisualGridLayout.ZoneEntryCell(zoneIndex, zoneCount, grid);
     }
 
     // The phase-1 placeholder grid cell (origin for inbound PutAway task generation).

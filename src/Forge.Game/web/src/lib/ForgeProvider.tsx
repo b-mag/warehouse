@@ -15,6 +15,7 @@
  */
 
 import {
+  HttpTransportType,
   HubConnection,
   HubConnectionBuilder,
   HubConnectionState,
@@ -100,10 +101,18 @@ export function ForgeProvider({ children }: { children: ReactNode }) {
       });
 
     // 2. SignalR connection with automatic reconnect.
+    // Same-origin hub URL (via Next rewrites) avoids CORS negotiate failures. Prefer
+    // WebSockets, but allow SSE/LongPolling so the proxy path still works if WS upgrade
+    // is unavailable.
     const connection = new HubConnectionBuilder()
-      .withUrl(SIGNALR_HUB_URL)
+      .withUrl(SIGNALR_HUB_URL, {
+        transport:
+          HttpTransportType.WebSockets |
+          HttpTransportType.ServerSentEvents |
+          HttpTransportType.LongPolling,
+      })
       .withAutomaticReconnect([0, 1000, 2000, 5000, 10000])
-      .configureLogging(LogLevel.Warning)
+      .configureLogging(LogLevel.None)
       .build();
     connectionRef.current = connection;
 
@@ -256,7 +265,10 @@ export function useForge(): ForgeState {
 
 function isNegotiationAbort(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
-  return message.includes("stopped during negotiation") || message.includes("The connection was stopped");
+  return (
+    message.includes("stopped during negotiation") ||
+    message.includes("The connection was stopped")
+  );
 }
 
 function describeError(err: unknown): string {

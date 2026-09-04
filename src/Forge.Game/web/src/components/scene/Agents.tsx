@@ -5,11 +5,8 @@
  * (task 37.2; Req 24.2, 24.3).
  *
  * INTERPOLATION RULE (Req 24.3): between authoritative updates the marker glides along
- * its `pathCells` at `cellsPerSecond` for smoothness, but it NEVER invents a destination —
- * it only advances toward cells the engine already planned, and it SNAPS to the
- * authoritative `(x, y)` whenever a new snapshot/update arrives. When an agent's
- * authoritative position holds still while it still has a path ahead, it is drawn with a
- * contention (hold) indicator, because spotting bottlenecks is the point.
+ * its remaining `pathCells` at `cellsPerSecond`. Path cells behind the agent are trimmed
+ * so a full historical path never pulls the marker backward (teleport look).
  */
 
 import { useFrame } from "@react-three/fiber";
@@ -17,24 +14,55 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Group } from "three";
 
 import type { AgentDto, CellDto } from "@/lib/contracts";
+import { CELL_WORLD, GRID_CENTER_X, GRID_CENTER_Y } from "@/lib/layout";
 
-/** World units per agent grid cell, and the y-height markers float at. */
-const CELL_WORLD = 1.1;
 const MARKER_Y = 1.2;
-
-// Phase-1: InMemoryTickStateProvider synthesizes a fixed 32×32 grid (unless overridden later).
-// The visual scene (zones/lots) is centered around world origin, so we center grid-cell
-// coordinates the same way to keep walking agents aligned with rendered storage areas.
-const GRID_WIDTH_CELLS = 32;
-const GRID_HEIGHT_CELLS = 32;
-const GRID_CENTER_X = (GRID_WIDTH_CELLS - 1) / 2;
-const GRID_CENTER_Y = (GRID_HEIGHT_CELLS - 1) / 2;
 const CARRY_CUBE = 0.45;
 const CARRY_CUBE_Y = 0.55;
 
-/** Map an agent grid cell to a world-space (x, z) position centered on the origin. */
 function cellToWorld(x: number, y: number): [number, number] {
   return [(x - GRID_CENTER_X) * CELL_WORLD, (y - GRID_CENTER_Y) * CELL_WORLD];
+}
+
+/** Build a continuous remaining path starting at the authoritative cell. */
+function remainingPath(agent: AgentDto): CellDto[] {
+  const cells: CellDto[] = [];
+  const path = agent.pathCells;
+  let start = 0;
+  for (let i = 0; i < path.length; i++) {
+    if (path[i].x === agent.x && path[i].y === agent.y) {
+      start = i;
+      break;
+    }
+  }
+
+  // If current cell is not in the path, begin from here then append future cells only
+  // when they continue forward (skip any prefix that would jump backward).
+  if (path.length === 0 || path[start].x !== agent.x || path[start].y !== agent.y) {
+    cells.push({ x: agent.x, y: agent.y });
+    for (const c of path) {
+      const last = cells[cells.length - 1];
+      const manhattan = Math.abs(c.x - last.x) + Math.abs(c.y - last.y);
+      if (manhattan === 1) {
+        cells.push(c);
+      } else if (c.x === last.x && c.y === last.y) {
+        continue;
+      } else {
+        // Discontinuity — stop; do not teleport through distant cells.
+        break;
+      }
+    }
+    return cells;
+  }
+
+  for (let i = start; i < path.length; i++) {
+    const c = path[i];
+    const last = cells[cells.length - 1];
+    if (!last || c.x !== last.x || c.y !== last.y) {
+      cells.push(c);
+    }
+  }
+  return cells.length > 0 ? cells : [{ x: agent.x, y: agent.y }];
 }
 
 interface AgentMarkerProps {
@@ -46,36 +74,20 @@ function AgentMarker({ agent, simSpeed }: AgentMarkerProps) {
   const ref = useRef<Group>(null);
   const holdRef = useRef<Group>(null);
 
-  // The authoritative path, from the agent's current cell through its planned cells.
-  const path = useMemo<CellDto[]>(() => {
-    const cells: CellDto[] = [{ x: agent.x, y: agent.y }];
-    for (const c of agent.pathCells) {
-      const last = cells[cells.length - 1];
-      if (c.x !== last.x || c.y !== last.y) {
-        cells.push(c);
-      }
-    }
-    return cells;
-  }, [agent.x, agent.y, agent.pathCells]);
+  const path = useMemo(() => remainingPath(agent), [agent.x, agent.y, agent.pathCells]);
 
-  // Progress along `path` in units of cells; reset to the authoritative start on snap.
   const progress = useRef(0);
   const lastAuthoritative = useRef({ x: agent.x, y: agent.y });
+  const visual = useRef({ x: agent.x, y: agent.y, frac: 0 });
 
-  // Detect whether the agent is advancing (moving) vs. held (contention). Held state is
-  // rendered (marker color + hold ring), so it lives in component state; the frame loop
-  // and effect keep a ref mirror to avoid reading state during render.
   const [held, setHeld] = useState(false);
   const isHeld = useRef(false);
-
   const stallTicks = useRef(0);
 
   useEffect(() => {
-    // PositionsUpdate often repeats the same cell between whole-cell engine ticks while a path
-    // remains — that is normal travel, not contention. Only mark held after several stalls.
     const prev = lastAuthoritative.current;
     const stalled = prev.x === agent.x && prev.y === agent.y;
-    if (stalled && agent.pathCells.length > 0) {
+    if (stalled && agent.pathCells.length > 1) {
       stallTicks.current += 1;
     } else {
       stallTicks.current = 0;
@@ -83,10 +95,21 @@ function AgentMarker({ agent, simSpeed }: AgentMarkerProps) {
     const nextHeld = stallTicks.current >= 8;
     isHeld.current = nextHeld;
     setHeld(nextHeld);
-    lastAuthoritative.current = { x: agent.x, y: agent.y };
+
+    // Soft-catch: if authority jumped more than one cell, ease from the last visual
+    // position by rebuilding progress at 0 on the new remaining path (no hard snap mid-frame).
+    const jump = Math.abs(agent.x - prev.x) + Math.abs(agent.y - prev.y);
     if (!stalled) {
-      progress.current = 0;
+      if (jump <= 1) {
+        progress.current = 0;
+      } else {
+        // Multi-cell tick: start interpolating from previous visual toward new path[0].
+        progress.current = 0;
+        visual.current = { x: prev.x, y: prev.y, frac: 0 };
+      }
     }
+
+    lastAuthoritative.current = { x: agent.x, y: agent.y };
   }, [agent.x, agent.y, agent.pathCells.length]);
 
   useFrame((_, delta) => {
@@ -95,7 +118,6 @@ function AgentMarker({ agent, simSpeed }: AgentMarkerProps) {
       return;
     }
 
-    // Advance along the authoritative path only; do not exceed the last planned cell.
     const speed = agent.cellsPerSecond > 0 ? agent.cellsPerSecond : 0;
     if (speed > 0 && path.length > 1 && !isHeld.current) {
       progress.current = Math.min(
@@ -109,15 +131,35 @@ function AgentMarker({ agent, simSpeed }: AgentMarkerProps) {
     const frac = p - i;
     const a = path[Math.min(i, path.length - 1)];
     const b = path[Math.min(i + 1, path.length - 1)];
-    const [ax, az] = cellToWorld(a.x, a.y);
-    const [bx, bz] = cellToWorld(b.x, b.y);
-    group.position.set(ax + (bx - ax) * frac, MARKER_Y, az + (bz - az) * frac);
+
+    // If we had a multi-cell jump, blend previous visual into the new path head first.
+    let ax = a.x;
+    let ay = a.y;
+    if (
+      visual.current.x !== a.x ||
+      visual.current.y !== a.y
+    ) {
+      const blend = Math.min(1, speed * delta * simSpeed * 2);
+      ax = visual.current.x + (a.x - visual.current.x) * blend;
+      ay = visual.current.y + (a.y - visual.current.y) * blend;
+      if (Math.abs(ax - a.x) + Math.abs(ay - a.y) < 0.05) {
+        visual.current = { x: a.x, y: a.y, frac: 0 };
+        ax = a.x;
+        ay = a.y;
+      } else {
+        visual.current = { x: ax, y: ay, frac: 0 };
+      }
+    }
+
+    const [wx0, wz0] = cellToWorld(ax, ay);
+    const [wx1, wz1] = cellToWorld(b.x, b.y);
+    const t = visual.current.x === a.x && visual.current.y === a.y ? frac : 0;
+    group.position.set(wx0 + (wx1 - wx0) * t, MARKER_Y, wz0 + (wz1 - wz0) * t);
 
     const hold = holdRef.current;
     if (hold) {
       hold.visible = isHeld.current;
       if (isHeld.current) {
-        // A gentle pulse on the hold ring to draw the eye to congestion.
         const s = 1 + Math.sin(performance.now() / 200) * 0.15;
         hold.scale.set(s, 1, s);
       }
@@ -126,7 +168,6 @@ function AgentMarker({ agent, simSpeed }: AgentMarkerProps) {
 
   return (
     <group ref={ref}>
-      {/* Forklift/worker marker: an extruded prism (pseudo-3D) tinted by motion. */}
       <mesh castShadow>
         <coneGeometry args={[0.6, 1.4, 4]} />
         <meshStandardMaterial
@@ -136,8 +177,6 @@ function AgentMarker({ agent, simSpeed }: AgentMarkerProps) {
         />
       </mesh>
 
-      {/* Inbound-train-cargo: a simple carried cube attached to the agent when it is executing
-          a PutAway task (authority sets carryingLotId). */}
       {agent.carryingLotId ? (
         <mesh position={[0, CARRY_CUBE_Y, 0]}>
           <boxGeometry args={[CARRY_CUBE, CARRY_CUBE, CARRY_CUBE]} />
@@ -145,7 +184,6 @@ function AgentMarker({ agent, simSpeed }: AgentMarkerProps) {
         </mesh>
       ) : null}
 
-      {/* Contention/hold indicator ring, shown only while the agent is held. */}
       <group ref={holdRef} visible={false} position={[0, -0.9, 0]}>
         <mesh rotation={[-Math.PI / 2, 0, 0]}>
           <ringGeometry args={[0.8, 1.1, 24]} />

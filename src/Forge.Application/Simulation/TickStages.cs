@@ -134,16 +134,20 @@ internal static partial class TickStages
             // was making task-bound agents wander and never complete (backlog never drained).
             bool hasTask = state.AgentTasks.ContainsKey(agent.Id);
 
-            // Dispatch: an idle, TASKLESS agent (no path, or standing on its path's destination) is handed
-            // a fresh patrol destination and routed there so the warehouse stays visibly in motion. The
-            // destination is a deterministic function of the agent id + its current cell, so identical
-            // state reproduces identical dispatch (Req 19.6).
+            // Dispatch: idle TASKLESS agents return to the staging bay and wait there (no random patrol).
+            // Destination is a deterministic bay slot from agent id (Req 19.6).
             if (!hasTask && (path is null || path.StepCount == 0 || agent.Position == path.Cells[^1]))
             {
+                if (VisualGridLayout.IsInIdleBay(agent.Position))
+                {
+                    agent.ClearPath();
+                    continue; // resting in the bay until TaskExecution assigns work
+                }
+
                 var target = NextDestination(state.Grid, agent);
                 if (target is not { } dest || dest == agent.Position)
                 {
-                    continue; // nowhere to send it this tick (degenerate grid)
+                    continue;
                 }
 
                 var dispatchPlan = planner.Plan(state.Grid, agent.Position, dest);
@@ -210,6 +214,15 @@ internal static partial class TickStages
 
             // Advance the agent to the last reserved cell (single-cell occupancy preserved — Req 18.2).
             agent.MoveTo(route.Cells[steps]);
+            // Keep CurrentPath as the remaining route from the new cell so clients never receive
+            // stale "past" cells (which looked like teleports when prepending agent.x/y).
+            var remaining = new Cell[route.Cells.Count - steps];
+            for (int i = 0; i < remaining.Length; i++)
+            {
+                remaining[i] = route.Cells[steps + i];
+            }
+
+            agent.AssignPath(new Forge.Domain.Spatial.Path(remaining));
             mutatedAgents.Add(agent);
         }
 
@@ -259,7 +272,9 @@ internal static partial class TickStages
         DateTimeOffset now,
         TimeSpan delta,
         List<WarehouseTask> mutatedTasks,
-        List<Agent> mutatedAgents)
+        List<Agent> mutatedAgents,
+        IReadOnlyList<GelLot> lots,
+        IReadOnlyList<Guid> orderedZoneIds)
     {
         ArgumentNullException.ThrowIfNull(state);
         ArgumentNullException.ThrowIfNull(unassigned);
@@ -267,6 +282,8 @@ internal static partial class TickStages
         ArgumentNullException.ThrowIfNull(planner);
         ArgumentNullException.ThrowIfNull(mutatedTasks);
         ArgumentNullException.ThrowIfNull(mutatedAgents);
+        ArgumentNullException.ThrowIfNull(lots);
+        ArgumentNullException.ThrowIfNull(orderedZoneIds);
 
         var events = new List<IDomainEvent>();
         int putAwayCompleted = 0;
@@ -276,11 +293,13 @@ internal static partial class TickStages
         int skippedAssignFailed = 0;
         int inFlightNotArrived = 0;
         var completedPutAwayLots = new List<GelLotId>();
+        var pickedUpLots = new List<GelLotId>();
 
         if (delta <= TimeSpan.Zero)
         {
             return new TaskExecutionOutcome(
-                events, putAwayCompleted, pickCompleted, 0, 0, 0, 0, 0, completedPutAwayLots);
+                events, putAwayCompleted, pickCompleted, 0, 0, 0, 0, 0,
+                completedPutAwayLots, pickedUpLots);
         }
 
         var link = state.AgentTasks;
@@ -303,11 +322,67 @@ internal static partial class TickStages
                 continue;
             }
 
-            var workCell = WorkCellFor(state.Grid, task);
+            var workCell = WorkCellFor(state, task, lots, orderedZoneIds);
             if (agent.Position != workCell)
             {
                 inFlightNotArrived++;
                 continue; // still travelling; AgentMovement advances it toward the work cell.
+            }
+
+            // PutAway leg 1: arrived at the train — pick up the pallet, then route to the zone face.
+            if (task.Type == WarehouseTaskType.PutAway &&
+                state.PutAwayTaskLotLinks.TryGetValue(task.Id, out var pickupLot) &&
+                IsLotInList(state.InboundQueueLotIds, pickupLot))
+            {
+                var inbound = state.InboundQueueLotIds;
+                RemoveLotFromList(ref inbound, pickupLot);
+                state.InboundQueueLotIds = inbound;
+
+                var transit = state.InTransitLotIds;
+                AppendLotToList(ref transit, pickupLot);
+                state.InTransitLotIds = transit;
+
+                var zoneCell = PutAwayZoneCell(state.Grid, task);
+                var toZone = planner.Plan(state.Grid, agent.Position, zoneCell);
+                if (!toZone.IsUnroutable)
+                {
+                    agent.AssignPath(toZone.Path);
+                    mutatedAgents.Add(agent);
+                }
+
+                inFlightNotArrived++;
+                continue;
+            }
+
+            // Pick leg 1: arrived at a holding zone — grab stored cargo, then route to the ship dock.
+            if (task.Type == WarehouseTaskType.Pick &&
+                !state.PickTaskLotLinks.ContainsKey(task.Id))
+            {
+                var lot = SelectPickableLot(lots, state, task);
+                if (lot is null)
+                {
+                    // Nothing left in storage — release and let another tick retry.
+                    link.TryRemove(agent.Id, out _);
+                    agent.ClearPath();
+                    continue;
+                }
+
+                state.PickTaskLotLinks[task.Id] = lot.Id;
+                var transit = state.InTransitLotIds;
+                AppendLotToList(ref transit, lot.Id);
+                state.InTransitLotIds = transit;
+                pickedUpLots.Add(lot.Id);
+
+                var dockCell = PickDockCell(state.Grid, task);
+                var toDock = planner.Plan(state.Grid, agent.Position, dockCell);
+                if (!toDock.IsUnroutable)
+                {
+                    agent.AssignPath(toDock.Path);
+                    mutatedAgents.Add(agent);
+                }
+
+                inFlightNotArrived++;
+                continue;
             }
 
             // Arrived: drive the guarded transition to completion. Start() first if still Assigned.
@@ -324,54 +399,38 @@ internal static partial class TickStages
                 {
                     putAwayCompleted++;
 
-                    // Inbound-train-cargo: once the PutAway finishes, the carried cube should
-                    // appear in the storage zones (renderer hides lots while inTransit).
                     if (state.PutAwayTaskLotLinks.TryGetValue(task.Id, out var lotId))
                     {
                         completedPutAwayLots.Add(lotId);
-
                         var transit = state.InTransitLotIds;
-                        int nextCount = 0;
-                        for (var i = 0; i < transit.Count; i++)
-                        {
-                            if (!transit[i].Equals(lotId))
-                            {
-                                nextCount++;
-                            }
-                        }
-
-                        if (nextCount != transit.Count)
-                        {
-                            var next = new GelLotId[nextCount];
-                            int k = 0;
-                            for (var i = 0; i < transit.Count; i++)
-                            {
-                                var id = transit[i];
-                                if (!id.Equals(lotId))
-                                {
-                                    next[k++] = id;
-                                }
-                            }
-                            state.InTransitLotIds = next;
-                        }
+                        RemoveLotFromList(ref transit, lotId);
+                        state.InTransitLotIds = transit;
                     }
                 }
                 else if (task.Type == WarehouseTaskType.Pick)
                 {
-                    pickCompleted++;
-
-                    // Outbound: deliver one pallet onto a Loading starship at an open berth.
-                    foreach (var ship in Ordered(state.Starships, s => s.Id))
+                    // Only load the ship after the worker carried cargo from a zone to the dock.
+                    if (state.PickTaskLotLinks.TryGetValue(task.Id, out var carriedLot))
                     {
-                        if (!CanLoadStarship(state, ship) || ship.RemainingCapacity <= 0)
+                        pickCompleted++;
+
+                        foreach (var ship in Ordered(state.Starships, s => s.Id))
                         {
-                            continue;
+                            if (!CanLoadStarship(state, ship) || ship.RemainingCapacity <= 0)
+                            {
+                                continue;
+                            }
+
+                            if (ship.TryLoad(VisualSimulationConstants.MaxPalletsLoadedPerTick).IsSuccess)
+                            {
+                                break;
+                            }
                         }
 
-                        if (ship.TryLoad(VisualSimulationConstants.MaxPalletsLoadedPerTick).IsSuccess)
-                        {
-                            break;
-                        }
+                        var transit = state.InTransitLotIds;
+                        RemoveLotFromList(ref transit, carriedLot);
+                        state.InTransitLotIds = transit;
+                        state.PickTaskLotLinks.TryRemove(task.Id, out _);
                     }
                 }
             }
@@ -382,11 +441,13 @@ internal static partial class TickStages
         }
 
         // ---- Phase B: assign fresh work to idle agents, up to the active cap. ----
-        // Only PutAway / Pick tasks are executed here (the movement-based work); Load/CycleCount/TempCheck
-        // are handled by other stages or are out of scope for agent travel.
+        // PutAway first so inbound never starves behind unfulfillable Picks (no stored inventory yet).
+        // Only PutAway / Pick tasks are executed here (Load/CycleCount/TempCheck are out of scope).
         var queue = new Queue<WarehouseTask>(
             Ordered(unassigned, t => t.Id)
-                .Where(t => t.Type is WarehouseTaskType.PutAway or WarehouseTaskType.Pick));
+                .Where(t => t.Type is WarehouseTaskType.PutAway or WarehouseTaskType.Pick)
+                .OrderBy(t => t.Type == WarehouseTaskType.PutAway ? 0 : 1)
+                .ThenBy(t => t.Id));
 
         foreach (var agent in agents)
         {
@@ -405,94 +466,47 @@ internal static partial class TickStages
                 break; // operator's WORKERS-ON-SHIFT cap reached for this tick
             }
 
-            var task = queue.Dequeue();
-
-            // Route the agent to the task's effective work cell; skip (leave task queued) if unroutable.
-            var workCell = WorkCellFor(state.Grid, task);
-            var plan = planner.Plan(state.Grid, agent.Position, workCell);
-            if (plan.IsUnroutable)
+            // Keep pulling until this agent gets a workable task (or the queue is empty).
+            // Previously a Pick with no stored inventory burned the agent AND discarded the task,
+            // so PutAways later in the queue never ran and workers sat in the breakroom forever.
+            while (queue.Count > 0)
             {
-                skippedUnroutable++;
-                continue;
-            }
+                var task = queue.Dequeue();
 
-            // Guarded assignment: Created/Queued -> Assigned. Reject leaves the task untouched.
-            if (task.AssignTo(agent.Worker).IsFailure)
-            {
-                skippedAssignFailed++;
-                continue;
-            }
-
-            agent.AssignPath(plan.Path);
-            link[agent.Id] = task.Id;
-
-            // Inbound-train-cargo: when a worker takes a PutAway task, the associated inbound
-            // lot leaves the train and becomes "carried" (renderer hides it from the static
-            // storage zones while in transit).
-            if (task.Type == WarehouseTaskType.PutAway)
-            {
-                if (state.PutAwayTaskLotLinks.TryGetValue(task.Id, out var lotId))
+                if (task.Type == WarehouseTaskType.Pick &&
+                    SelectPickableLot(lots, state, task) is null)
                 {
-                    // Remove from inbound queue.
-                    var inboundQueue = state.InboundQueueLotIds;
-                    int nextQueueCount = 0;
-                    for (var i = 0; i < inboundQueue.Count; i++)
-                    {
-                        if (!inboundQueue[i].Equals(lotId))
-                        {
-                            nextQueueCount++;
-                        }
-                    }
-
-                    if (nextQueueCount != inboundQueue.Count)
-                    {
-                        var nextQueue = new GelLotId[nextQueueCount];
-                        int k = 0;
-                        for (var i = 0; i < inboundQueue.Count; i++)
-                        {
-                            var id = inboundQueue[i];
-                            if (!id.Equals(lotId))
-                            {
-                                nextQueue[k++] = id;
-                            }
-                        }
-                        state.InboundQueueLotIds = nextQueue;
-                    }
-
-                    // Add to in-transit set (as an ordered list for rendering).
-                    var transit = state.InTransitLotIds;
-                    bool alreadyInTransit = false;
-                    for (var i = 0; i < transit.Count; i++)
-                    {
-                        if (transit[i].Equals(lotId))
-                        {
-                            alreadyInTransit = true;
-                            break;
-                        }
-                    }
-
-                    if (!alreadyInTransit)
-                    {
-                        var nextTransit = new GelLotId[transit.Count + 1];
-                        for (var i = 0; i < transit.Count; i++)
-                        {
-                            nextTransit[i] = transit[i];
-                        }
-                        nextTransit[transit.Count] = lotId;
-                        state.InTransitLotIds = nextTransit;
-                    }
+                    skippedAssignFailed++;
+                    continue; // try next task for the same agent
                 }
-            }
 
-            mutatedTasks.Add(task);
-            mutatedAgents.Add(agent);
-            assigned++;
+                var workCell = WorkCellFor(state, task, lots, orderedZoneIds);
+                var plan = planner.Plan(state.Grid, agent.Position, workCell);
+                if (plan.IsUnroutable)
+                {
+                    skippedUnroutable++;
+                    continue;
+                }
+
+                if (task.AssignTo(agent.Worker).IsFailure)
+                {
+                    skippedAssignFailed++;
+                    continue;
+                }
+
+                agent.AssignPath(plan.Path);
+                link[agent.Id] = task.Id;
+                mutatedTasks.Add(task);
+                mutatedAgents.Add(agent);
+                assigned++;
+                break; // this agent is busy
+            }
         }
 
         return new TaskExecutionOutcome(
             events, putAwayCompleted, pickCompleted,
             assigned, skippedUnroutable, skippedAssignFailed, inFlightNotArrived, queue.Count,
-            completedPutAwayLots);
+            completedPutAwayLots, pickedUpLots);
     }
 
     /// <summary>
@@ -599,11 +613,8 @@ internal static partial class TickStages
     }
 
     /// <summary>
-    /// Pick the next patrol destination for an idle <paramref name="agent"/> on <paramref name="grid"/>
-    /// (Phase-1 dispatch). Destinations rotate through a fixed ring of in-bounds anchor cells (the grid
-    /// corners and edge midpoints) so agents shuttle across long, visible routes; the choice is a pure
-    /// function of the agent id and its current cell, so identical state reproduces identical dispatch
-    /// (Req 19.6). Returns <see langword="null"/> for a degenerate (zero-size) grid.
+    /// Idle workers walk to a deterministic staging-bay slot (Req 19.6). Returns null on a
+    /// degenerate grid.
     /// </summary>
     private static Cell? NextDestination(WarehouseGrid grid, Agent agent)
     {
@@ -612,96 +623,242 @@ internal static partial class TickStages
             return null;
         }
 
-        int maxX = grid.Width - 1;
-        int maxY = grid.Height - 1;
-        int midX = maxX / 2;
-        int midY = maxY / 2;
+        var bay = VisualGridLayout.IdleBaySlot(grid, agent);
+        return bay == agent.Position ? null : bay;
+    }
 
-        // A fixed ring of anchors, all guaranteed in-bounds (the demo grid is all-aisle so each is
-        // reachable). Order is stable, which keeps dispatch deterministic.
-        Cell[] anchors =
+    /// <summary>
+    /// The effective grid work cell an agent travels to for <paramref name="task"/>.
+    /// PutAway is two-legged: rail pickup first (while lot is still inbound), then zone face.
+    /// Pick is two-legged: holding-zone grab first, then ship dock.
+    /// </summary>
+    private static Cell WorkCellFor(
+        TickState state,
+        WarehouseTask task,
+        IReadOnlyList<GelLot> lots,
+        IReadOnlyList<Guid> orderedZoneIds)
+    {
+        var grid = state.Grid;
+        if (grid.Width <= 0 || grid.Height <= 0)
         {
-            new(0, 0),
-            new(maxX, 0),
-            new(maxX, maxY),
-            new(0, maxY),
-            new(midX, 0),
-            new(maxX, midY),
-            new(midX, maxY),
-            new(0, midY),
-        };
+            return task.Destination;
+        }
 
-        // Start the rotation from a stable per-agent offset, then advance by where the agent currently
-        // is, so on arrival it deterministically moves on to a different anchor rather than re-picking
-        // the one it is standing on.
-        int baseOffset = (int)(StableGuidFold(agent.Id.Value) % (uint)anchors.Length);
-        for (int i = 0; i < anchors.Length; i++)
+        if (task.Type == WarehouseTaskType.PutAway &&
+            state.PutAwayTaskLotLinks.TryGetValue(task.Id, out var lotId) &&
+            IsLotInList(state.InboundQueueLotIds, lotId))
         {
-            var candidate = anchors[(baseOffset + i) % anchors.Length];
-            if (candidate != agent.Position)
+            return VisualGridLayout.ReceivingPickupCell(grid);
+        }
+
+        if (task.Type == WarehouseTaskType.PutAway)
+        {
+            return PutAwayZoneCell(grid, task);
+        }
+
+        if (task.Type == WarehouseTaskType.Pick)
+        {
+            if (state.PickTaskLotLinks.ContainsKey(task.Id))
             {
-                return candidate;
+                return PickDockCell(grid, task);
+            }
+
+            var lot = SelectPickableLot(lots, state, task);
+            if (lot?.AssignedZoneId is { } zoneId)
+            {
+                return VisualGridLayout.ZoneEntryCellForId(zoneId.Value, orderedZoneIds, grid);
+            }
+
+            // Fallback: a deterministic zone face until inventory appears.
+            uint fold = StableGuidFold(task.Id.Value);
+            int zoneCount = Math.Max(1, orderedZoneIds.Count);
+            return VisualGridLayout.ZoneEntryCell((int)(fold % (uint)zoneCount), zoneCount, grid);
+        }
+
+        var dest = task.Destination;
+        bool inBounds = dest.X >= 0 && dest.X < grid.Width && dest.Y >= 0 && dest.Y < grid.Height;
+        bool degenerate = dest is { X: 0, Y: 0 };
+
+        if (inBounds && !degenerate)
+        {
+            if (!grid.IsTraversable(dest))
+            {
+                return NearestTraversable(grid, dest) ?? VisualGridLayout.ReceivingPickupCell(grid);
+            }
+
+            return dest;
+        }
+
+        uint fxFold = StableGuidFold(task.Id.Value);
+        int fx = (int)(fxFold % (uint)grid.Width);
+        int fy = (int)((fxFold / (uint)grid.Width) % (uint)grid.Height);
+        return new Cell(fx, fy);
+    }
+
+    private static Cell PickDockCell(WarehouseGrid grid, WarehouseTask task)
+    {
+        uint fold = StableGuidFold(task.Id.Value);
+        int berthCount = Math.Max(1, Math.Min(4, grid.Width / 6));
+        int berth = (int)(fold % (uint)berthCount);
+        int spacing = Math.Max(1, grid.Width / (berthCount + 1));
+        int x = Math.Clamp(spacing * (berth + 1), 0, grid.Width - 1);
+        int y = grid.Height > 0 ? grid.Height - 1 : 0;
+        var cell = new Cell(x, y);
+        if (grid.IsTraversable(cell))
+        {
+            return cell;
+        }
+
+        return NearestTraversable(grid, cell) ?? cell;
+    }
+
+    /// <summary>
+    /// FEFO-ish pickable lot already sitting in a holding zone (not inbound, not already carried).
+    /// </summary>
+    private static GelLot? SelectPickableLot(
+        IReadOnlyList<GelLot> lots,
+        TickState state,
+        WarehouseTask _)
+    {
+        // Lots already claimed by another in-flight pick.
+        var claimed = new HashSet<GelLotId>();
+        foreach (var kv in state.PickTaskLotLinks)
+        {
+            claimed.Add(kv.Value);
+        }
+
+        GelLot? best = null;
+        foreach (var lot in lots)
+        {
+            if (lot.IsExpired || lot.Quantity <= 0 || lot.AssignedZoneId is null)
+            {
+                continue;
+            }
+
+            if (claimed.Contains(lot.Id) || IsLotInList(state.InTransitLotIds, lot.Id) ||
+                IsLotInList(state.InboundQueueLotIds, lot.Id))
+            {
+                continue;
+            }
+
+        // Prefer earliest expiry, then FEFO priority, then lot id (Req 19.6).
+        if (best is null ||
+            lot.ExpiresAt < best.ExpiresAt ||
+            (lot.ExpiresAt == best.ExpiresAt && lot.FefoPriority < best.FefoPriority) ||
+            (lot.ExpiresAt == best.ExpiresAt && lot.FefoPriority == best.FefoPriority &&
+             lot.Id.Value.CompareTo(best.Id.Value) < 0))
+        {
+            best = lot;
+        }
+      }
+
+      return best;
+    }
+
+    private static Cell PutAwayZoneCell(WarehouseGrid grid, WarehouseTask task)
+    {
+        var dest = task.Destination;
+        bool inBounds = dest.X >= 0 && dest.X < grid.Width && dest.Y >= 0 && dest.Y < grid.Height;
+        bool degenerate = dest is { X: 0, Y: 0 };
+
+        if (inBounds && !degenerate)
+        {
+            if (grid.IsTraversable(dest))
+            {
+                return dest;
+            }
+
+            return NearestTraversable(grid, dest) ?? VisualGridLayout.ReceivingPickupCell(grid);
+        }
+
+        uint fold = StableGuidFold(task.Id.Value);
+        int zoneCount = 6;
+        int zoneIndex = (int)(fold % (uint)zoneCount);
+        return VisualGridLayout.ZoneEntryCell(zoneIndex, zoneCount, grid);
+    }
+
+    private static Cell? NearestTraversable(WarehouseGrid grid, Cell around)
+    {
+        for (int r = 0; r <= 4; r++)
+        {
+            for (int dx = -r; dx <= r; dx++)
+            {
+                for (int dy = -r; dy <= r; dy++)
+                {
+                    if (Math.Abs(dx) != r && Math.Abs(dy) != r)
+                    {
+                        continue;
+                    }
+
+                    var c = new Cell(around.X + dx, around.Y + dy);
+                    if (grid.IsTraversable(c))
+                    {
+                        return c;
+                    }
+                }
             }
         }
 
         return null;
     }
 
-    /// <summary>
-    /// The effective grid work cell an agent travels to for <paramref name="task"/>.
-    /// <para>
-    /// Phase-1 tasks may carry a degenerate dock placeholder origin/destination (until full
-    /// zone-to-cell persistence exists). When that placeholder is detected, we map it into a
-    /// deterministic task-type-specific region of the grid so workers still move toward meaningful
-    /// receiving/storage areas instead of collapsing onto a single cell. A task that already carries
-    /// a real in-bounds destination is honoured as-is. Pure and reproducible: identical (grid, task id)
-    /// always yields the identical cell (Req 19.6).
-    /// </para>
-    /// </summary>
-    private static Cell WorkCellFor(WarehouseGrid grid, WarehouseTask task)
+    private static bool IsLotInList(IReadOnlyList<GelLotId> list, GelLotId lotId)
     {
-        if (grid.Width <= 0 || grid.Height <= 0)
+        for (int i = 0; i < list.Count; i++)
         {
-            return task.Destination;
+            if (list[i].Equals(lotId))
+            {
+                return true;
+            }
         }
 
-        var dest = task.Destination;
-        bool inBounds = dest.X >= 0 && dest.X < grid.Width && dest.Y >= 0 && dest.Y < grid.Height;
-        bool degenerate = dest is { X: 0, Y: 0 }; // the placeholder dock cell
+        return false;
+    }
 
-        if (inBounds && !degenerate)
+    private static void RemoveLotFromList(ref IReadOnlyList<GelLotId> list, GelLotId lotId)
+    {
+        int nextCount = 0;
+        for (int i = 0; i < list.Count; i++)
         {
-            return dest;
+            if (!list[i].Equals(lotId))
+            {
+                nextCount++;
+            }
         }
 
-        // Phase-1: tasks are still created with a degenerate dock placeholder cell for origin /
-        // destination. For visual unification, map that placeholder into a task-type specific,
-        // deterministic region of the grid instead of spraying across the entire floor.
-        uint fold = StableGuidFold(task.Id.Value);
-
-        if (degenerate && task.Type == WarehouseTaskType.PutAway)
+        if (nextCount == list.Count)
         {
-            // Receiving rail: low-Y edge, left side (matches ReceivingTrain placement).
-            int x = Math.Min(2, Math.Max(0, grid.Width - 1));
-            int y = 0;
-            return new Cell(x, y);
+            return;
         }
 
-        if (degenerate && task.Type == WarehouseTaskType.Pick)
+        var next = new GelLotId[nextCount];
+        int k = 0;
+        for (int i = 0; i < list.Count; i++)
         {
-            // Ship dock edge: high-Y berths — workers walk cargo out to terminals.
-            int berthCount = Math.Max(1, Math.Min(4, grid.Width / 6));
-            int berth = (int)(fold % (uint)berthCount);
-            int spacing = Math.Max(1, grid.Width / (berthCount + 1));
-            int x = Math.Clamp(spacing * (berth + 1), 0, grid.Width - 1);
-            int y = grid.Height > 0 ? grid.Height - 1 : 0;
-            return new Cell(x, y);
+            if (!list[i].Equals(lotId))
+            {
+                next[k++] = list[i];
+            }
         }
 
-        // Fallback: deterministic in-bounds cell.
-        int fx = (int)(fold % (uint)grid.Width);
-        int fy = (int)((fold / (uint)grid.Width) % (uint)grid.Height);
-        return new Cell(fx, fy);
+        list = next;
+    }
+
+    private static void AppendLotToList(ref IReadOnlyList<GelLotId> list, GelLotId lotId)
+    {
+        if (IsLotInList(list, lotId))
+        {
+            return;
+        }
+
+        var next = new GelLotId[list.Count + 1];
+        for (int i = 0; i < list.Count; i++)
+        {
+            next[i] = list[i];
+        }
+
+        next[list.Count] = lotId;
+        list = next;
     }
 
     /// <summary>
@@ -734,3 +891,4 @@ internal static partial class TickStages
         return list;
     }
 }
+

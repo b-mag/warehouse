@@ -23,9 +23,11 @@ import {
 } from "@/lib/layout";
 
 import { Agents } from "./Agents";
+import { IdleBay } from "./IdleBay";
 import { Lots } from "./Lots";
 import { ReceivingTrain } from "./ReceivingTrain";
 import { Starships } from "./Starships";
+import { WarehouseFloor } from "./WarehouseFloor";
 import { Zones } from "./Zones";
 
 interface OperationsViewProps {
@@ -125,6 +127,11 @@ function SceneCanvas({
       <directionalLight position={[30, 50, 20]} intensity={1.1} />
       <hemisphereLight args={["#9fb8d6", "#20252e", 0.4]} />
 
+      <WarehouseFloor
+        placements={placements}
+        openDockBays={snapshot.parameters.openDockBays}
+      />
+      <IdleBay />
       <Zones placements={placements} lotsByZone={lotsByZone} />
       <Lots placements={placements} lotsByZone={lotsByZone} />
       <ReceivingTrain lotIds={inboundQueueLotIds} />

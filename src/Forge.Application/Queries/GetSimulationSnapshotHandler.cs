@@ -167,15 +167,31 @@ public sealed class GetSimulationSnapshotHandler
 
         if (tickState.PutAwayTaskLotLinks.TryGetValue(taskId, out var lotId))
         {
-            return lotId.Value;
+            for (int i = 0; i < tickState.InTransitLotIds.Count; i++)
+            {
+                if (tickState.InTransitLotIds[i].Equals(lotId))
+                {
+                    return lotId.Value;
+                }
+            }
+
+            return null;
         }
 
         if (tickState.PickTaskLotLinks.TryGetValue(taskId, out var pickLot))
         {
-            return pickLot.Value;
+            for (int i = 0; i < tickState.InTransitLotIds.Count; i++)
+            {
+                if (tickState.InTransitLotIds[i].Equals(pickLot))
+                {
+                    return pickLot.Value;
+                }
+            }
+
+            return null;
         }
 
-        return taskId.Value;
+        return null;
     }
 
     private static StarshipDto ToStarshipDto(Starship starship, int dockIndex, string phase) => new(

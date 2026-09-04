@@ -1,14 +1,16 @@
 /**
  * Runtime configuration for the Forge web client (task 37.1).
  *
- * The REST base URL and SignalR hub URL both derive from the headless engine base,
- * configurable via the `NEXT_PUBLIC_FORGE_API` environment variable and defaulting to
- * `http://localhost:5195`. `NEXT_PUBLIC_`-prefixed vars are inlined into the client
- * bundle by Next.js, so this resolves in the browser.
+ * By default the browser talks to the **same origin** (empty base). Next.js rewrites
+ * `/api/*` and `/hub/*` to the headless engine (`http://localhost:5195`), which avoids
+ * cross-origin SignalR negotiate failures.
+ *
+ * Set `NEXT_PUBLIC_FORGE_API` only when you need the browser to call the engine directly
+ * (then Forge:WebClientOrigins must include the page origin).
  */
 
 export const FORGE_API_BASE = (
-  process.env.NEXT_PUBLIC_FORGE_API ?? "http://localhost:5195"
+  process.env.NEXT_PUBLIC_FORGE_API ?? ""
 ).replace(/\/+$/, "");
 
 /** REST endpoint paths, resolved against {@link FORGE_API_BASE}. */

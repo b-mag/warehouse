@@ -233,8 +233,10 @@ public sealed class InMemoryTickStateProvider : ITickStateProvider
         _gridWidth = gridWidth;
         _gridHeight = gridHeight;
 
-        // An all-aisle grid keeps every cell traversable so the demo agents can always be routed.
-        var grid = new WarehouseGrid(gridWidth, gridHeight);
+        // Zone interiors are blocked so workers path through aisles (no cutting through holding areas).
+        const int seededZoneCount = 6;
+        var blocked = VisualGridLayout.BuildZoneBlockedCells(seededZoneCount, gridWidth, gridHeight);
+        var grid = new WarehouseGrid(gridWidth, gridHeight, blocked);
 
         int poolCount = maxAgentCount > 0 ? maxAgentCount : agentCount;
         poolCount = Math.Max(0, poolCount);
@@ -268,9 +270,14 @@ public sealed class InMemoryTickStateProvider : ITickStateProvider
             var agentId = new AgentId(DeterministicIds.Derive(seed, "agent", i));
             var workerId = new WorkerId(DeterministicIds.Derive(seed, "agent-worker", i));
 
-            // Spread the agents along the first row (and wrap to further rows for larger counts) so no
-            // two start on the same cell; positions are a pure function of (i, width).
-            var start = new Cell(i % width, (i / width) % height);
+            // Spawn inside the idle staging bay so workers start "on break" until work arrives.
+            int bayW = Math.Max(1, VisualGridLayout.IdleBayMaxX - VisualGridLayout.IdleBayMinX + 1);
+            int bayH = Math.Max(1, VisualGridLayout.IdleBayMaxY - VisualGridLayout.IdleBayMinY + 1);
+            int x = VisualGridLayout.IdleBayMinX + (i % bayW);
+            int y = VisualGridLayout.IdleBayMinY + ((i / bayW) % bayH);
+            x = Math.Clamp(x, 0, width - 1);
+            y = Math.Clamp(y, 0, height - 1);
+            var start = new Cell(x, y);
             agents.Add(new Agent(agentId, workerId, start, cellsPerSecond: 1.5));
         }
 

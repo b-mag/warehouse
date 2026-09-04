@@ -152,27 +152,37 @@ public sealed class ApplyTickRulesHandlerTests
     }
 
     [Fact]
-    public async Task Stage3_idle_agent_is_dispatched_a_destination_and_moves()
+    public async Task Stage3_idle_agent_is_dispatched_toward_staging_bay_and_moves()
     {
-        // The dispatch step: an agent with NO assigned path is handed a patrol destination, routed
-        // there, and advanced this tick — so the warehouse stays visibly in motion (the fix that made
-        // the agents actually travel). Verifies the agent leaves its start cell and its position stays
-        // on the (all-aisle) grid.
+        // Idle agents walk to the staging bay (not a random patrol ring) and stay there until work.
         var ctx = new TestContext();
-        var grid = new WarehouseGrid(16, 16); // all-aisle: every anchor is reachable
+        var grid = new WarehouseGrid(32, 32);
         var agent = new Agent(AgentId.New(), WorkerId.New(), new Cell(0, 0), cellsPerSecond: 2);
-        // NOTE: no AssignPath — the agent is idle and must be dispatched by the stage itself.
         ctx.TickState.Set(new TickState(grid, new[] { agent }, new ReservationLedger(), Array.Empty<Starship>()));
 
         var result = await ctx.Handler.ApplyTickRulesAsync(Delta);
 
         Assert.True(result.IsSuccess);
-        // It was dispatched a path and advanced off its start cell.
         Assert.NotEqual(new Cell(0, 0), agent.Position);
         Assert.InRange(agent.Position.X, 0, grid.Width - 1);
         Assert.InRange(agent.Position.Y, 0, grid.Height - 1);
         Assert.NotNull(agent.CurrentPath);
-        Assert.Equal(1, ctx.UnitOfWork.SaveCount); // the agent move was staged + committed
+        Assert.Equal(1, ctx.UnitOfWork.SaveCount);
+    }
+
+    [Fact]
+    public async Task Stage3_idle_agent_already_in_bay_stays_put()
+    {
+        var ctx = new TestContext();
+        var grid = new WarehouseGrid(32, 32);
+        var bay = new Cell(VisualGridLayout.IdleBayMinX, VisualGridLayout.IdleBayMinY);
+        var agent = new Agent(AgentId.New(), WorkerId.New(), bay, cellsPerSecond: 2);
+        ctx.TickState.Set(new TickState(grid, new[] { agent }, new ReservationLedger(), Array.Empty<Starship>()));
+
+        var result = await ctx.Handler.ApplyTickRulesAsync(Delta);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(bay, agent.Position);
     }
 
     [Fact]

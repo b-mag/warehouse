@@ -18,4 +18,6 @@ internal sealed record TaskExecutionOutcome(
     int SkippedAssignFailed,
     int InFlightNotArrived,
     int QueueDepth,
-    IReadOnlyList<GelLotId> CompletedPutAwayLotIds);
+    IReadOnlyList<GelLotId> CompletedPutAwayLotIds,
+    /// <summary>Lots pulled from a holding zone onto a worker (zone.TryRemove).</summary>
+    IReadOnlyList<GelLotId> PickedUpLotIds);

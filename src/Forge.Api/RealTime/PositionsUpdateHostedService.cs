@@ -118,17 +118,33 @@ public sealed class PositionsUpdateHostedService : BackgroundService
             return null;
         }
 
+        // PutAway: only show a cube after the worker has picked up at the train (lot in transit).
         if (tickState.PutAwayTaskLotLinks.TryGetValue(taskId, out var lotId))
         {
-            return lotId.Value;
+            for (int i = 0; i < tickState.InTransitLotIds.Count; i++)
+            {
+                if (tickState.InTransitLotIds[i].Equals(lotId))
+                {
+                    return lotId.Value;
+                }
+            }
+
+            return null;
         }
 
         if (tickState.PickTaskLotLinks.TryGetValue(taskId, out var pickLot))
         {
-            return pickLot.Value;
+            for (int i = 0; i < tickState.InTransitLotIds.Count; i++)
+            {
+                if (tickState.InTransitLotIds[i].Equals(pickLot))
+                {
+                    return pickLot.Value;
+                }
+            }
+
+            return null;
         }
 
-        // Any in-flight PutAway/Pick still shows a carried cube even before a lot link exists.
-        return taskId.Value;
+        return null;
     }
 }

@@ -179,54 +179,8 @@ public sealed class ApplyTickRulesHandler
             events.AddRange(TickStages.AgentMovement(
                 state, _planner, now, simDelta, mutatedAgents, static _ => null));
 
-            // Stage 4: load only ships that are in the Loading phase at an open berth.
-            // Cap to 1 pallet/tick so fill+depart is visually readable (worker carry will own this later).
-            Func<Starship, (GelTypeId GelType, int Quantity)?> demandFor = ship =>
-            {
-                if (!TickStages.CanLoadStarship(state!, ship))
-                {
-                    return null;
-                }
-
-                int remaining = ship.RemainingCapacity;
-                if (remaining <= 0)
-                {
-                    return null;
-                }
-
-                // Resolve "open demand" from order lines whose delivery window includes 'now'.
-                // (Phase-1 visual story: deterministic, order-driven loading without per-line fulfillment tracking.)
-                var destinationOrders = orders
-                    .Where(o =>
-                        o.Colony == ship.Destination &&
-                        o.DeliveryWindowStart <= now &&
-                        o.DeliveryWindowEnd >= now)
-                    .ToArray();
-
-                if (destinationOrders.Length == 0)
-                {
-                    return null;
-                }
-
-                var line = destinationOrders
-                    .OrderBy(o => o.Id)
-                    .SelectMany(o => o.Lines)
-                    .OrderBy(l => l.GelType.Value)
-                    .FirstOrDefault();
-
-                if (line is null)
-                {
-                    return null;
-                }
-
-                int requested = (int)Math.Ceiling(line.Quantity * _operatorParameters.DemandMultiplier);
-                requested = Math.Clamp(
-                    requested,
-                    1,
-                    Math.Min(remaining, VisualSimulationConstants.MaxPalletsLoadedPerTick));
-                return (line.GelType, requested);
-            };
-
+            // Stage 4: no bulk FEFO inventory→ship load (workers carry zone→dock).
+            // Still run StarshipLoading with null demand so window-close events fire (Req 13.6).
             events.AddRange(TickStages.StarshipLoading(
                 state,
                 _loadingService,
@@ -234,9 +188,9 @@ public sealed class ApplyTickRulesHandler
                 now,
                 simDelta,
                 mutatedStarships,
-                demandFor));
+                static _ => null));
 
-            // Re-run lifecycle so a ship that just hit capacity this tick enters Departing immediately.
+            // Re-run lifecycle so capacity/dwell still drives Departing.
             TickStages.StarshipLifecycle(state!, now, TimeSpan.FromTicks(1), openDockBays);
         }
 
@@ -259,6 +213,11 @@ public sealed class ApplyTickRulesHandler
             }
 
             int workersOnShift = _operatorParameters.WorkersOnShift;
+            var orderedZones = (await _zones.ListAllAsync(ct).ConfigureAwait(false))
+                .OrderBy(z => z.Id)
+                .ToArray();
+            var orderedZoneIds = orderedZones.Select(z => z.Id.Value).ToArray();
+
             var execution = TickStages.TaskExecution(
                 state,
                 unassignedTasks,
@@ -268,7 +227,9 @@ public sealed class ApplyTickRulesHandler
                 now,
                 simDelta,
                 mutatedTasks,
-                mutatedAgents);
+                mutatedAgents,
+                allLots,
+                orderedZoneIds);
 
             foreach (var task in mutatedTasks)
             {
@@ -277,35 +238,55 @@ public sealed class ApplyTickRulesHandler
 
             events.AddRange(execution.Events);
 
-            // PutAway complete → actually store into the zone so holding areas show inventory.
-            if (execution.CompletedPutAwayLotIds.Count > 0)
+            var zonesById = orderedZones.ToDictionary(z => z.Id);
+            var lotsById = allLots.ToDictionary(l => l.Id);
+
+            // PutAway complete → store into the zone so holding areas show inventory.
+            foreach (var lotId in execution.CompletedPutAwayLotIds.OrderBy(id => id))
             {
-                var zonesById = (await _zones.ListAllAsync(ct).ConfigureAwait(false))
-                    .ToDictionary(z => z.Id);
-                var lotsById = allLots.ToDictionary(l => l.Id);
-
-                foreach (var lotId in execution.CompletedPutAwayLotIds.OrderBy(id => id))
+                if (!lotsById.TryGetValue(lotId, out var lot))
                 {
-                    if (!lotsById.TryGetValue(lotId, out var lot))
-                    {
-                        lot = await _lots.GetByIdAsync(lotId, ct).ConfigureAwait(false);
-                        if (lot is null)
-                        {
-                            continue;
-                        }
-                    }
-
-                    if (lot.AssignedZoneId is not { } zoneId ||
-                        !zonesById.TryGetValue(zoneId, out var zone))
+                    lot = await _lots.GetByIdAsync(lotId, ct).ConfigureAwait(false);
+                    if (lot is null)
                     {
                         continue;
                     }
+                }
 
-                    if (zone.TryStore(lot.Quantity).IsSuccess)
+                if (lot.AssignedZoneId is not { } zoneId ||
+                    !zonesById.TryGetValue(zoneId, out var zone))
+                {
+                    continue;
+                }
+
+                if (zone.TryStore(lot.Quantity).IsSuccess)
+                {
+                    _zones.Update(zone);
+                    mutatedLots.Add(lot);
+                }
+            }
+
+            // Pick pickup → remove from holding zone (worker is carrying it to the dock).
+            foreach (var lotId in execution.PickedUpLotIds.OrderBy(id => id))
+            {
+                if (!lotsById.TryGetValue(lotId, out var lot))
+                {
+                    lot = await _lots.GetByIdAsync(lotId, ct).ConfigureAwait(false);
+                    if (lot is null)
                     {
-                        _zones.Update(zone);
-                        mutatedLots.Add(lot); // keep save path active; lot already assigned
+                        continue;
                     }
+                }
+
+                if (lot.AssignedZoneId is not { } zoneId ||
+                    !zonesById.TryGetValue(zoneId, out var zone))
+                {
+                    continue;
+                }
+
+                if (zone.TryRemove(1).IsSuccess)
+                {
+                    _zones.Update(zone);
                 }
             }
 
