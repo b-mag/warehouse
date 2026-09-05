@@ -148,10 +148,7 @@ public sealed class InMemoryTickStateProvider : ITickStateProvider
             // keep it stable for deterministic projection.
             var nextAgents = orderedPool.Where(a => activeIds.Contains(a.Id)).ToArray();
 
-            // Spawn newly-active agents near receiving, but OFF the rail (y=2) so they are not
-            // mistaken for the train locomotive.
-            int receivingX = Math.Min(4, Math.Max(0, _gridWidth - 1));
-            int receivingY = Math.Min(2, Math.Max(0, _gridHeight - 1));
+            // Spawn newly-active agents in the idle bay so they look "on break" until tasked.
             foreach (var agent in nextAgents)
             {
                 if (prevActiveIds.Contains(agent.Id))
@@ -164,10 +161,7 @@ public sealed class InMemoryTickStateProvider : ITickStateProvider
                     continue; // should not happen, but defensive
                 }
 
-                // Offset along the receiving strip to avoid stacks when many workers activate at once.
-                int poolIndex = _agentPoolIndexById.TryGetValue(agent.Id, out var idx) ? idx : 0;
-                int x = (receivingX + poolIndex) % Math.Max(1, _gridWidth);
-                agent.MoveTo(new Cell(x, receivingY));
+                agent.MoveTo(VisualGridLayout.IdleBaySlot(_state.Grid, agent));
                 agent.ClearPath();
             }
 
@@ -180,6 +174,7 @@ public sealed class InMemoryTickStateProvider : ITickStateProvider
                 PutAwayTaskLotLinks = prev.PutAwayTaskLotLinks,
                 PickTaskLotLinks = prev.PickTaskLotLinks,
                 StarshipRuntimes = prev.StarshipRuntimes,
+                Train = prev.Train,
             };
         }
     }

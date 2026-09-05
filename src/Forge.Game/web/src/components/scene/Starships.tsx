@@ -7,17 +7,20 @@
 
 import { Text } from "@react-three/drei";
 import { useFrame } from "@react-three/fiber";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   ExtrudeGeometry,
   Shape,
   type Group,
 } from "three";
 
-import type { StarshipDto } from "@/lib/contracts";
+import {
+  getMotion,
+  getMotionIdentityVersion,
+  subscribeMotionIdentity,
+} from "@/lib/motionStore";
 
 interface StarshipsProps {
-  starships: StarshipDto[];
   edgeZ: number;
   openDockBays: number;
   simSpeed: number;
@@ -134,6 +137,13 @@ function DockPads({ edgeZ, openDockBays }: { edgeZ: number; openDockBays: number
 
 function DoritoMesh({ thrustersOn }: { thrustersOn: boolean }) {
   const geometry = useMemo(() => makeDoritoGeometry(), []);
+
+  useEffect(() => {
+    return () => {
+      geometry.dispose();
+    };
+  }, [geometry]);
+
   const glow = thrustersOn ? 1.35 : 0.55;
 
   return (
@@ -199,75 +209,90 @@ function DoritoMesh({ thrustersOn }: { thrustersOn: boolean }) {
 }
 
 function StarshipHull({
-  ship,
+  shipId,
   index,
   edgeZ,
   bayCount,
   simSpeed,
 }: {
-  ship: StarshipDto;
+  shipId: string;
   index: number;
   edgeZ: number;
   bayCount: number;
   simSpeed: number;
 }) {
   const ref = useRef<Group>(null);
+  const labelRef = useRef<string>("");
+  const [, setLabel] = useState("");
   const mode = useRef<FlightMode>("away");
   const yaw = useRef(DOCK_YAW);
   const pitch = useRef(0);
   const progress = useRef(0);
-  const lastPhase = useRef(ship.phase);
-  const style = useRef<TakeoffStyle>(takeoffStyle(ship.id));
+  const lastPhase = useRef("Away");
+  const style = useRef<TakeoffStyle>(takeoffStyle(shipId));
   const [thrustersOn, setThrustersOn] = useState(false);
-  const dock = dockPose(ship.dockIndex, index, edgeZ, bayCount);
-  const fill =
-    ship.capacity > 0 ? Math.max(0, Math.min(1, ship.loaded / ship.capacity)) : 0;
-
-  useEffect(() => {
-    const prev = lastPhase.current;
-    const next = ship.phase;
-    lastPhase.current = next;
-    style.current = takeoffStyle(ship.id);
-
-    if (next === "Approaching" && prev !== "Approaching") {
-      mode.current = "arriving_hover";
-      progress.current = 0;
-      yaw.current = APPROACH_YAW; // point forward into travel (−Z toward pad)
-      pitch.current = 0;
-      if (ref.current) {
-        ref.current.position.set(dock.x, dock.y + 16, dock.z + 28);
-        ref.current.visible = true;
-      }
-    } else if (
-      (next === "Departing" || next === "Away") &&
-      (prev === "Loading" || prev === "Docked" || prev === "Unloading" || prev === "Departing")
-    ) {
-      if (
-        mode.current === "docked" ||
-        mode.current === "arriving_lower" ||
-        mode.current === "arriving_rotate" ||
-        mode.current === "arriving_hover"
-      ) {
-        mode.current = "depart_rise";
-        progress.current = 0;
-      }
-    } else if (next === "Loading" || next === "Docked" || next === "Unloading") {
-      if (mode.current === "away" || mode.current === "depart_fly") {
-        mode.current = "arriving_hover";
-        progress.current = 0;
-      } else if (
-        mode.current !== "arriving_hover" &&
-        mode.current !== "arriving_rotate" &&
-        mode.current !== "arriving_lower"
-      ) {
-        mode.current = "docked";
-      }
-    }
-  }, [ship.phase, ship.id, dock.x, dock.y, dock.z]);
+  const fillRef = useRef(0);
+  const dockRef = useRef(dockPose(-1, index, edgeZ, bayCount));
 
   useFrame((_, delta) => {
+    const ship = getMotion().starships.find((s) => s.id === shipId);
     const g = ref.current;
-    if (!g) return;
+    if (!g || !ship) {
+      if (g) g.visible = false;
+      return;
+    }
+
+    const dock = dockPose(ship.dockIndex, index, edgeZ, bayCount);
+    dockRef.current = dock;
+    fillRef.current =
+      ship.capacity > 0 ? Math.max(0, Math.min(1, ship.loaded / ship.capacity)) : 0;
+
+    const nextLabel = `${ship.loaded}/${ship.capacity} · SHIP · ${ship.phase}`;
+    if (nextLabel !== labelRef.current) {
+      labelRef.current = nextLabel;
+      setLabel(nextLabel);
+    }
+
+    const prev = lastPhase.current;
+    const next = ship.phase;
+    if (next !== prev) {
+      lastPhase.current = next;
+      style.current = takeoffStyle(ship.id);
+
+      if (next === "Approaching" && prev !== "Approaching") {
+        mode.current = "arriving_hover";
+        progress.current = 0;
+        yaw.current = APPROACH_YAW;
+        pitch.current = 0;
+        g.position.set(dock.x, dock.y + 16, dock.z + 28);
+        g.visible = true;
+      } else if (
+        (next === "Departing" || next === "Away") &&
+        (prev === "Loading" || prev === "Docked" || prev === "Unloading" || prev === "Departing")
+      ) {
+        if (
+          mode.current === "docked" ||
+          mode.current === "arriving_lower" ||
+          mode.current === "arriving_rotate" ||
+          mode.current === "arriving_hover"
+        ) {
+          mode.current = "depart_rise";
+          progress.current = 0;
+        }
+      } else if (next === "Loading" || next === "Docked" || next === "Unloading") {
+        if (mode.current === "away" || mode.current === "depart_fly") {
+          mode.current = "arriving_hover";
+          progress.current = 0;
+        } else if (
+          mode.current !== "arriving_hover" &&
+          mode.current !== "arriving_rotate" &&
+          mode.current !== "arriving_lower"
+        ) {
+          mode.current = "docked";
+        }
+      }
+    }
+
     const dt = delta * Math.max(0.35, simSpeed);
     const active = mode.current !== "away" && mode.current !== "docked";
     if (active !== thrustersOn) {
@@ -285,7 +310,6 @@ function StarshipHull({
       g.position.z += (dock.z - g.position.z) * Math.min(1, 3.5 * dt);
       yaw.current += (DOCK_YAW - yaw.current) * Math.min(1, 3.5 * dt);
       pitch.current += (0 - pitch.current) * Math.min(1, 3.5 * dt);
-      // Gentle hover bob
       g.position.y = dock.y + Math.sin(performance.now() / 700) * 0.08;
       applyPose();
       g.visible = true;
@@ -315,7 +339,6 @@ function StarshipHull({
     if (mode.current === "arriving_rotate") {
       progress.current = Math.min(1, progress.current + dt * 0.55);
       const t = progress.current;
-      // Rotate flat-back toward warehouse (point away).
       yaw.current = APPROACH_YAW + (DOCK_YAW - APPROACH_YAW) * t;
       g.position.set(dock.x, dock.y + 4, dock.z);
       pitch.current = 0;
@@ -333,7 +356,6 @@ function StarshipHull({
       const t = progress.current;
       const ease = t * t;
       g.position.set(dock.x, dock.y + 4 * (1 - ease), dock.z);
-      // Slight rear-down pitch toward warehouse while settling.
       pitch.current = 0.18 * Math.sin(t * Math.PI);
       yaw.current = DOCK_YAW;
       applyPose();
@@ -366,19 +388,9 @@ function StarshipHull({
       const t = progress.current;
       const ease = t * t;
       if (style.current === "vtol") {
-        // Pure vertical climb already done — translate away with thrusters.
-        g.position.set(
-          dock.x,
-          dock.y + 18 + 6 * ease,
-          dock.z + 40 * ease,
-        );
+        g.position.set(dock.x, dock.y + 18 + 6 * ease, dock.z + 40 * ease);
       } else {
-        // Climb-and-go diagonal.
-        g.position.set(
-          dock.x,
-          dock.y + 7 + 14 * ease,
-          dock.z + 48 * ease,
-        );
+        g.position.set(dock.x, dock.y + 7 + 14 * ease, dock.z + 48 * ease);
       }
       yaw.current = DOCK_YAW;
       pitch.current = -0.12 * ease;
@@ -394,18 +406,20 @@ function StarshipHull({
     g.visible = false;
   });
 
+  const fill = fillRef.current;
+  const dock = dockRef.current;
+
   return (
     <group ref={ref} position={[dock.x, dock.y, dock.z]} visible={false}>
       <DoritoMesh thrustersOn={thrustersOn} />
 
-      {/* Cargo fill bar above the slab */}
       <group position={[-SHIP_SIZE * 0.35, SHIP_THICK / 2 + 0.2, -SHIP_SIZE * 0.15]}>
         <mesh position={[SHIP_SIZE * 0.35, 0, 0]}>
           <boxGeometry args={[SHIP_SIZE * 0.7, 0.12, 0.28]} />
           <meshStandardMaterial color="#0a0c10" />
         </mesh>
         <mesh position={[(SHIP_SIZE * 0.7 * fill) / 2, 0, 0.01]}>
-          <boxGeometry args={[SHIP_SIZE * 0.7 * fill || 0.001, 0.16, 0.32]} />
+          <boxGeometry args={[SHIP_SIZE * 0.7 * Math.max(fill, 0.001), 0.16, 0.32]} />
           <meshStandardMaterial color="#4edc7a" emissive="#0f5c2c" emissiveIntensity={0.45} />
         </mesh>
       </group>
@@ -417,26 +431,35 @@ function StarshipHull({
         anchorX="center"
         anchorY="middle"
       >
-        {`${ship.loaded}/${ship.capacity} · SHIP · ${ship.phase}`}
+        {labelRef.current || "SHIP"}
       </Text>
     </group>
   );
 }
 
-export function Starships({ starships, edgeZ, openDockBays, simSpeed }: StarshipsProps) {
-  const ordered = useMemo(
-    () => [...starships].sort((a, b) => a.id.localeCompare(b.id)),
-    [starships],
+export function Starships({ edgeZ, openDockBays, simSpeed }: StarshipsProps) {
+  const identityVersion = useSyncExternalStore(
+    subscribeMotionIdentity,
+    getMotionIdentityVersion,
+    getMotionIdentityVersion,
   );
+
+  const shipIds = useMemo(() => {
+    void identityVersion;
+    return [...getMotion().starships]
+      .map((s) => s.id)
+      .sort((a, b) => a.localeCompare(b));
+  }, [identityVersion]);
+
   const bayCount = Math.max(openDockBays, 1);
 
   return (
     <group>
       <DockPads edgeZ={edgeZ} openDockBays={openDockBays} />
-      {ordered.map((ship, index) => (
+      {shipIds.map((id, index) => (
         <StarshipHull
-          key={ship.id}
-          ship={ship}
+          key={id}
+          shipId={id}
           index={index}
           edgeZ={edgeZ}
           bayCount={bayCount}

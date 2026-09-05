@@ -231,6 +231,8 @@ public sealed class RecordInboundGelReceiptHandlerTests
         public void Add(GelLot lot) => Added.Add(lot);
 
         public void Update(GelLot lot) { }
+
+        public void Remove(GelLot lot) => Added.Remove(lot);
     }
 
     private sealed class FakeZoneRepository(IReadOnlyList<TemperatureZone> zones) : IZoneRepository

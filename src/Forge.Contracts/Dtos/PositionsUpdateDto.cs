@@ -7,8 +7,9 @@ namespace Forge.Contracts.Dtos;
 public sealed record PositionsUpdateDto(
     IReadOnlyList<AgentDto> Agents,
     IReadOnlyList<StarshipDto> Starships,
-    /// <summary>Lot ids currently on the inbound train/conveyor (to be rendered later).</summary>
+    /// <summary>Lot ids currently on the inbound train/conveyor.</summary>
     IReadOnlyList<Guid> InboundQueueLotIds,
-    /// <summary>Lot ids currently being carried/in-transit (to hide from static lot rendering).</summary>
-    IReadOnlyList<Guid> InTransitLotIds);
-
+    /// <summary>Lot ids currently being carried/in-transit.</summary>
+    IReadOnlyList<Guid> InTransitLotIds,
+    TrainDto? Train,
+    DateTimeOffset SimulatedAt);

@@ -114,11 +114,27 @@ public sealed class GetSimulationSnapshotHandler
             : ToStarshipsDto(tickState);
 
         var zoneDtos = zones.Select(ToZoneDto).ToArray();
-        var lotDtos = lots.Select(ToLotDto).ToArray();
+        // Active inventory only — zero-qty lots are archived and excluded from the live view.
+        var lotDtos = lots.Where(l => l.Quantity > 0).Select(ToLotDto).ToArray();
 
         // Read-only projections: ToDto reads current values only and never mutates the components.
         var metrics = _metrics.ToDto(_dockScheduler, _primaryDockBay);
         var parameters = _parameters.ToDto();
+
+        TrainDto? trainDto = null;
+        IReadOnlyList<Guid> inbound = Array.Empty<Guid>();
+        IReadOnlyList<Guid> inTransit = Array.Empty<Guid>();
+        if (tickState is not null)
+        {
+            var tr = tickState.Train;
+            trainDto = new TrainDto(
+                Id: tr.Id,
+                Phase: tr.Phase,
+                CarCount: tr.CarCount,
+                LotIds: tr.LotIds.Select(l => l.Value).ToArray());
+            inbound = tickState.InboundQueueLotIds.Select(l => l.Value).ToArray();
+            inTransit = tickState.InTransitLotIds.Select(l => l.Value).ToArray();
+        }
 
         return new SimulationSnapshotDto(
             Zones: zoneDtos,
@@ -126,7 +142,11 @@ public sealed class GetSimulationSnapshotHandler
             Agents: agents,
             Starships: starships,
             Metrics: metrics,
-            Parameters: parameters);
+            Parameters: parameters,
+            SimulatedAt: _clock.Now,
+            Train: trainDto,
+            InboundQueueLotIds: inbound,
+            InTransitLotIds: inTransit);
     }
 
     // ---- Pure domain → DTO projections (no mutation). ----

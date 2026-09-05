@@ -47,6 +47,10 @@ var operatorOptions = new OperatorParameterOptions
 {
     WorkerMax = 25,
     ModeledDockBays = infrastructureOptions.DockBayCount,
+    InitialSimSpeed = 60.0,
+    InitialTrainsPerDay = 1.0,
+    InitialShipsPerDay = 4.0,
+    InitialInboundRate = 0.0,
 };
 
 // ---- WMS Core + input driver DI --------------------------------------------------------------

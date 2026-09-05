@@ -281,6 +281,7 @@ public sealed class GetSimulationSnapshotHandlerTests
 
         public void Add(GelLot lot) => Written.Add(lot);
         public void Update(GelLot lot) => Written.Add(lot);
+        public void Remove(GelLot lot) { }
     }
 
     private sealed class FakeTickStateProvider : ITickStateProvider

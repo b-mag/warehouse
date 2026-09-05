@@ -22,11 +22,17 @@ public static class OperatorParameterRanges
     /// <summary>Lower bound for open dock bays (Req 20.4). Upper bound is the count of physically modeled bays.</summary>
     public const int OpenDockBaysMin = 0;
 
-    /// <summary>Inbound arrival rate must be non-negative (Req 20.5).</summary>
+    /// <summary>Inbound arrival rate must be non-negative (Req 20.5). Deprecated when trains-per-day drives inbound.</summary>
     public const double InboundRateMin = 0.0;
 
     /// <summary>Colony demand multiplier must be non-negative (Req 20.6).</summary>
     public const double DemandMultiplierMin = 0.0;
+
+    /// <summary>Trains per simulated day must be non-negative.</summary>
+    public const double TrainsPerDayMin = 0.0;
+
+    /// <summary>Ships per simulated day must be non-negative.</summary>
+    public const double ShipsPerDayMin = 0.0;
 
     /// <summary>Returns true when a sim-speed value is within range (Req 20.2, 20.8).</summary>
     public static bool IsValidSimSpeed(double value) =>
@@ -47,6 +53,14 @@ public static class OperatorParameterRanges
     /// <summary>Returns true when a demand-multiplier value is non-negative and finite (Req 20.6, 20.8).</summary>
     public static bool IsValidDemandMultiplier(double value) =>
         value >= DemandMultiplierMin && !double.IsNaN(value) && !double.IsInfinity(value);
+
+    /// <summary>Returns true when trains-per-day is non-negative and finite.</summary>
+    public static bool IsValidTrainsPerDay(double value) =>
+        value >= TrainsPerDayMin && !double.IsNaN(value) && !double.IsInfinity(value);
+
+    /// <summary>Returns true when ships-per-day is non-negative and finite.</summary>
+    public static bool IsValidShipsPerDay(double value) =>
+        value >= ShipsPerDayMin && !double.IsNaN(value) && !double.IsInfinity(value);
 
     /// <summary>Returns true when a slotting-strategy key is recognized (Req 20.7, 20.8).</summary>
     public static bool IsValidSlottingStrategy(string? key) =>

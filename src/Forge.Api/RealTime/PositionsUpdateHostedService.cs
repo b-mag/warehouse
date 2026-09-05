@@ -16,11 +16,13 @@ namespace Forge.Api.RealTime;
 public sealed class PositionsUpdateHostedService : BackgroundService
 {
     private static readonly TimeSpan Interval = TimeSpan.FromMilliseconds(200);
+    private static readonly LoadingWindowDto[] EmptyWindows = Array.Empty<LoadingWindowDto>();
 
     private readonly ITickStateProvider _tickState;
     private readonly IClock _clock;
     private readonly ISimulationClientNotifier _notifier;
-    private readonly OperatorParameterState _operatorParameters;
+
+    private string? _lastFingerprint;
 
     public PositionsUpdateHostedService(
         ITickStateProvider tickState,
@@ -31,7 +33,7 @@ public sealed class PositionsUpdateHostedService : BackgroundService
         _tickState = tickState ?? throw new ArgumentNullException(nameof(tickState));
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
         _notifier = notifier ?? throw new ArgumentNullException(nameof(notifier));
-        _operatorParameters = operatorParameters ?? throw new ArgumentNullException(nameof(operatorParameters));
+        _ = operatorParameters;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -83,6 +85,7 @@ public sealed class PositionsUpdateHostedService : BackgroundService
                 CarryingLotId: TryCarryingLotId(tickState, a.Id)))
             .ToArray();
 
+        // Slim starship projection: empty Windows on the high-frequency channel.
         var starships = tickState.Starships
             .OrderBy(s => s.Id)
             .Select(ship =>
@@ -96,19 +99,73 @@ public sealed class PositionsUpdateHostedService : BackgroundService
                     Capacity: ship.CargoCapacity,
                     Loaded: ship.LoadedQuantity,
                     DestinationColony: ship.Destination.Value,
-                    Windows: ship.Windows.Select(w => new LoadingWindowDto(w.Start, w.End)).ToArray(),
+                    Windows: EmptyWindows,
                     Phase: phase,
                     DockIndex: dockIndex);
             })
             .ToArray();
 
+        var trainRt = tickState.Train;
+        var trainLots = trainRt.Phase is TrainPhases.Away or TrainPhases.Departing
+            ? Array.Empty<Guid>()
+            : trainRt.LotIds.Select(l => l.Value).ToArray();
+
+        var train = new TrainDto(
+            Id: trainRt.Id,
+            Phase: trainRt.Phase,
+            CarCount: trainRt.CarCount,
+            LotIds: trainLots);
+
+        var inbound = tickState.InboundQueueLotIds.Select(l => l.Value).ToArray();
+        var transit = tickState.InTransitLotIds.Select(l => l.Value).ToArray();
+        var simulatedAt = _clock.Now;
+
+        var fingerprint = BuildFingerprint(agents, starships, inbound, transit, train, simulatedAt);
+        if (fingerprint == _lastFingerprint)
+        {
+            return;
+        }
+
+        _lastFingerprint = fingerprint;
+
         var payload = new PositionsUpdateDto(
             Agents: agents,
             Starships: starships,
-            InboundQueueLotIds: tickState.InboundQueueLotIds.Select(l => l.Value).ToArray(),
-            InTransitLotIds: tickState.InTransitLotIds.Select(l => l.Value).ToArray());
+            InboundQueueLotIds: inbound,
+            InTransitLotIds: transit,
+            Train: train,
+            SimulatedAt: simulatedAt);
 
         await _notifier.NotifyAsync("PositionsUpdate", payload, ct).ConfigureAwait(false);
+    }
+
+    private static string BuildFingerprint(
+        AgentDto[] agents,
+        StarshipDto[] starships,
+        Guid[] inbound,
+        Guid[] transit,
+        TrainDto train,
+        DateTimeOffset simulatedAt)
+    {
+        // Include second-resolution clock so HUD advances under acceleration even when idle.
+        var sb = new System.Text.StringBuilder(256);
+        sb.Append(simulatedAt.UtcTicks / TimeSpan.TicksPerSecond).Append('|');
+        sb.Append(train.Phase).Append(':').Append(train.CarCount).Append(':').Append(train.LotIds.Count).Append('|');
+        sb.Append(inbound.Length).Append(':').Append(transit.Length).Append('|');
+        foreach (var a in agents)
+        {
+            sb.Append(a.Id).Append('@').Append(a.X).Append(',').Append(a.Y)
+                .Append('p').Append(a.PathCells.Count)
+                .Append('c').Append(a.CarryingLotId).Append(';');
+        }
+
+        foreach (var s in starships)
+        {
+            sb.Append(s.Id).Append(':').Append(s.Phase).Append(':')
+                .Append(s.DockIndex).Append(':').Append(s.Loaded).Append(';');
+        }
+
+        return sb.ToString();
     }
 
     private static Guid? TryCarryingLotId(TickState tickState, AgentId agentId)
@@ -118,7 +175,6 @@ public sealed class PositionsUpdateHostedService : BackgroundService
             return null;
         }
 
-        // PutAway: only show a cube after the worker has picked up at the train (lot in transit).
         if (tickState.PutAwayTaskLotLinks.TryGetValue(taskId, out var lotId))
         {
             for (int i = 0; i < tickState.InTransitLotIds.Count; i++)

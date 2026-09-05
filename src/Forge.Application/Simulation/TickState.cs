@@ -95,6 +95,11 @@ public sealed record TickState(
     /// </summary>
     public ConcurrentDictionary<StarshipId, StarshipRuntime> StarshipRuntimes { get; init; } =
         new ConcurrentDictionary<StarshipId, StarshipRuntime>();
+
+    /// <summary>
+    /// Single inbound train consist (Phase 1: one active visit at a time).
+    /// </summary>
+    public TrainRuntime Train { get; set; } = new();
 }
 
 /// <summary>
@@ -112,6 +117,86 @@ public sealed class StarshipRuntime
 
     /// <summary>Inbound pallets still to unload on this visit (0 = arrive empty / ready to load).</summary>
     public int UnloadRemaining { get; set; }
+
+    /// <summary>Lots discharged from this visit (tracked until put-away leaves inbound/transit).</summary>
+    public List<GelLotId> InboundLotIds { get; set; } = new();
+
+    /// <summary>True after inbound receipts were issued for the current produce-bearing visit.</summary>
+    public bool InboundCargoMaterialized { get; set; }
+
+    /// <summary>Driver sets this when Approaching needs inbound produce created this tick.</summary>
+    public bool NeedsInboundMaterialization { get; set; }
+
+    /// <summary>How many inbound lots to create when materializing (set at visit start).</summary>
+    public int PendingInboundLotCount { get; set; }
+
+    /// <summary>Record materialized inbound lots; keeps phase Approaching until approach duration ends.</summary>
+    public void MarkInboundMaterialized(IReadOnlyList<GelLotId> lotIds)
+    {
+        ArgumentNullException.ThrowIfNull(lotIds);
+        InboundLotIds = lotIds.ToList();
+        UnloadRemaining = lotIds.Count;
+        InboundCargoMaterialized = true;
+        NeedsInboundMaterialization = false;
+        PendingInboundLotCount = 0;
+    }
+}
+
+/// <summary>Authoritative inbound train phases projected to clients.</summary>
+public static class TrainPhases
+{
+    public const string Approaching = "Approaching";
+    public const string Unloading = "Unloading";
+    public const string Departing = "Departing";
+    public const string Away = "Away";
+}
+
+/// <summary>Single inbound train consist runtime.</summary>
+public sealed class TrainRuntime
+{
+    public Guid Id { get; set; } = Guid.Parse("aaaaaaaa-0000-4000-8000-000000000001");
+
+    public string Phase { get; set; } = TrainPhases.Away;
+
+    public DateTimeOffset PhaseEnteredAt { get; set; }
+
+    public int CarCount { get; set; }
+
+    /// <summary>Lots that arrived with this consist (still on rail until picked up).</summary>
+    public List<GelLotId> LotIds { get; set; } = new();
+
+    /// <summary>Sim day index for which the next visit was already scheduled (legacy; prefer NextArrivalAt).</summary>
+    public int LastScheduledDayIndex { get; set; } = -1;
+
+    /// <summary>Which train slot within the day was last started (0-based).</summary>
+    public int LastSlotIndex { get; set; } = -1;
+
+    /// <summary>Next scheduled arrival (sim clock). Null means "arrive on the next Away evaluation".</summary>
+    public DateTimeOffset? NextArrivalAt { get; set; }
+
+    /// <summary>True after cargo receipts were issued for the current visit.</summary>
+    public bool CargoMaterialized { get; set; }
+
+    /// <summary>Driver sets this when Approaching needs cargo created this tick.</summary>
+    public bool NeedsCargoMaterialization { get; set; }
+
+    /// <summary>
+    /// Called by the Simulation driver after issuing inbound receipts for this visit.
+    /// Keeps phase Approaching so the consist can roll in already loaded.
+    /// </summary>
+    public void MarkCargoMaterialized(IReadOnlyList<GelLotId> lotIds, DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(lotIds);
+
+        LotIds = lotIds.ToList();
+        int cars = Math.Max(
+            1,
+            (int)Math.Ceiling(lotIds.Count / (double)VisualSimulationConstants.TrainCarCapacityPallets));
+        CarCount = Math.Min(VisualSimulationConstants.MaxTrainCars, cars);
+        CargoMaterialized = true;
+        NeedsCargoMaterialization = false;
+        _ = now;
+    }
 }
 
 /// <summary>Authoritative starship phase strings projected to clients.</summary>

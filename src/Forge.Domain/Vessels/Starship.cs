@@ -143,11 +143,45 @@ public sealed class Starship
         return Result.Success();
     }
 
-    /// <summary>
-    /// Clears cargo after a completed departure so the vessel can begin a fresh outbound trip
-    /// (Phase-1 visual recycle). Does not change destination or windows.
-    /// </summary>
+    /// <summary>Clears cargo after a completed departure so the vessel can begin a fresh trip.</summary>
     public void ClearCargo() => LoadedQuantity = 0;
+
+    /// <summary>
+    /// Sets loaded quantity for an inbound visit (arrive-with-produce) or to sync remaining unload.
+    /// Must stay within <c>[0, CargoCapacity]</c>.
+    /// </summary>
+    public Result SetLoadedQuantity(int quantity)
+    {
+        if (quantity < 0 || quantity > CargoCapacity)
+        {
+            return DomainError.InvalidCapacity(
+                $"Starship loaded quantity must be within [0, {CargoCapacity}]; got {quantity}.");
+        }
+
+        LoadedQuantity = quantity;
+        return Result.Success();
+    }
+
+    /// <summary>Removes inbound cargo as it is discharged to the dock (symmetric to <see cref="TryLoad"/>).</summary>
+    public Result TryUnload(int quantity)
+    {
+        if (quantity <= 0)
+        {
+            return DomainError.InvalidValue(
+                $"Unload quantity must be strictly positive; got {quantity}.");
+        }
+
+        if (quantity > LoadedQuantity)
+        {
+            return DomainError.CapacityExceeded(
+                Id.ToString(),
+                quantity,
+                LoadedQuantity);
+        }
+
+        LoadedQuantity -= quantity;
+        return Result.Success();
+    }
 
     /// <summary>
     /// Pure admission helper: returns <c>true</c> when <paramref name="now"/> is inside any of the

@@ -68,7 +68,7 @@ public sealed class InventoryUpdateHostedService : BackgroundService
 
         var payload = new InventoryUpdateDto(
             Zones: zoneList.Select(ToZoneDto).ToArray(),
-            Lots: lotList.Select(ToLotDto).ToArray());
+            Lots: lotList.Where(l => l.Quantity > 0).Select(ToLotDto).ToArray());
 
         await _notifier.NotifyAsync("InventoryUpdate", payload, ct).ConfigureAwait(false);
     }

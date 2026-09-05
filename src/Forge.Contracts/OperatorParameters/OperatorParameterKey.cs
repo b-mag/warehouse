@@ -14,4 +14,6 @@ public static class OperatorParameterKey
     public const string InboundRate = "inbound-rate";
     public const string DemandMultiplier = "demand-multiplier";
     public const string SlottingStrategy = "slotting-strategy";
+    public const string TrainsPerDay = "trains-per-day";
+    public const string ShipsPerDay = "ships-per-day";
 }

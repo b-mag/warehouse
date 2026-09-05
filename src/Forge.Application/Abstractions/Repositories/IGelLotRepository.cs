@@ -25,4 +25,7 @@ public interface IGelLotRepository
 
     /// <summary>Stage mutations to an existing lot (expiry, at-risk, quantity, zone assignment) for update.</summary>
     void Update(GelLot lot);
+
+    /// <summary>Stage removal of a depleted / archived lot so inventory projections stay bounded.</summary>
+    void Remove(GelLot lot);
 }

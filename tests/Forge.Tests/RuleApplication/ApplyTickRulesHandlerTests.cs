@@ -478,6 +478,7 @@ public sealed class ApplyTickRulesHandlerTests
 
         public void Add(GelLot lot) => _lots.Add(lot);
         public void Update(GelLot lot) => Updated.Add(lot);
+        public void Remove(GelLot lot) => _lots.Remove(lot);
     }
 
     private sealed class FakeZoneRepository : IZoneRepository

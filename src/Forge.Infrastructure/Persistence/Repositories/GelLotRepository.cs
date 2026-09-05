@@ -53,4 +53,11 @@ public sealed class GelLotRepository : IGelLotRepository
         ArgumentNullException.ThrowIfNull(lot);
         _context.GelLots.Update(lot);
     }
+
+    /// <inheritdoc />
+    public void Remove(GelLot lot)
+    {
+        ArgumentNullException.ThrowIfNull(lot);
+        _context.GelLots.Remove(lot);
+    }
 }

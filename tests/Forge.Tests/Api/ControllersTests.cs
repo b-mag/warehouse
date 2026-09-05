@@ -252,7 +252,11 @@ public sealed class ControllersTests
             Agents: Array.Empty<AgentDto>(),
             Starships: Array.Empty<StarshipDto>(),
             Metrics: new BacklogMetricsDto(0, 0, 0d, 0d, 0, 0d),
-            Parameters: new OperatorParameterStateDto(1.0, 5, 4, 1.0, 1.0, "velocity-affinity"));
+            Parameters: new OperatorParameterStateDto(1.0, 5, 4, 1.0, 1.0, "velocity-affinity", 1.0, 4.0),
+            SimulatedAt: DateTimeOffset.UnixEpoch,
+            Train: null,
+            InboundQueueLotIds: Array.Empty<Guid>(),
+            InTransitLotIds: Array.Empty<Guid>());
 
     private sealed class FakeGateway : IWarehouseCommandGateway
     {

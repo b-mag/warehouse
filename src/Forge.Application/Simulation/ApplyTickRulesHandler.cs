@@ -169,9 +169,11 @@ public sealed class ApplyTickRulesHandler
             state = await _tickState.GetTickStateAsync(ct).ConfigureAwait(false);
 
             int openDockBays = _operatorParameters.OpenDockBays;
+            double shipsPerDay = _operatorParameters.ShipsPerDay;
+            double trainsPerDay = _operatorParameters.TrainsPerDay;
 
-            // Engine-owned ship lifecycle (fly in / load / fly out when full).
-            TickStages.StarshipLifecycle(state!, now, simDelta, openDockBays);
+            TickStages.TrainLifecycle(state!, now, simDelta, trainsPerDay);
+            TickStages.StarshipLifecycle(state!, now, simDelta, openDockBays, shipsPerDay);
 
             // Stage 3: advance agents. UnroutableTask events carry the task id an agent is executing; with
             // no persisted agent→task link yet, no id is resolvable, so the event is raised only when a
@@ -191,7 +193,8 @@ public sealed class ApplyTickRulesHandler
                 static _ => null));
 
             // Re-run lifecycle so capacity/dwell still drives Departing.
-            TickStages.StarshipLifecycle(state!, now, TimeSpan.FromTicks(1), openDockBays);
+            TickStages.StarshipLifecycle(state!, now, TimeSpan.FromTicks(1), openDockBays, shipsPerDay);
+            TickStages.TrainLifecycle(state!, now, TimeSpan.FromTicks(1), trainsPerDay);
         }
 
         // ---- Stage 3.5: Task execution — agents claim, travel to, and complete PutAway/Pick tasks. ----
@@ -237,6 +240,14 @@ public sealed class ApplyTickRulesHandler
             }
 
             events.AddRange(execution.Events);
+
+            // Re-check vessel depart after picks may have loaded cargo this tick.
+            TickStages.StarshipLifecycle(
+                state,
+                now,
+                TimeSpan.FromTicks(1),
+                _operatorParameters.OpenDockBays,
+                _operatorParameters.ShipsPerDay);
 
             var zonesById = orderedZones.ToDictionary(z => z.Id);
             var lotsById = allLots.ToDictionary(l => l.Id);

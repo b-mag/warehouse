@@ -123,21 +123,42 @@ export function warehouseFloorBounds(
 }
 
 /** Temperature band classification used only to tint zone floors for readability. */
-export type TempBand = "frozen" | "chilled" | "cool" | "ambient";
+export type TempBand =
+  | "frozen"
+  | "deep_chilled"
+  | "chilled"
+  | "cool"
+  | "cellar"
+  | "ambient";
 
+/** Map seed bands (Frozen / DeepChilled / Chilled / Cool / Cellar / Ambient) by midpoint. */
 export function temperatureBand(zone: TemperatureZoneDto): TempBand {
   const mid = (zone.minC + zone.maxC) / 2;
   if (mid <= -18) return "frozen";
+  if (mid <= -2) return "deep_chilled";
   if (mid <= 2) return "chilled";
-  if (mid <= 10) return "cool";
+  if (mid <= 6) return "cool";
+  if (mid <= 12) return "cellar";
   return "ambient";
+}
+
+/** Short label for zone floor text. */
+export function temperatureBandLabel(band: TempBand): string {
+  switch (band) {
+    case "deep_chilled":
+      return "deep chilled";
+    default:
+      return band;
+  }
 }
 
 /** Base floor tint per band (a readable cold→warm ramp). */
 export const BAND_COLOR: Record<TempBand, string> = {
   frozen: "#2b5ea8",
+  deep_chilled: "#2f6f9e",
   chilled: "#3d8bbf",
   cool: "#4aa88a",
+  cellar: "#6b8f5a",
   ambient: "#b58b3a",
 };
 

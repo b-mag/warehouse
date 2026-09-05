@@ -1,5 +1,6 @@
 using Forge.Application.Abstractions;
 using Forge.Application.Abstractions.Commands;
+using Forge.Application.Simulation;
 using Forge.Contracts.Dtos;
 using Forge.Domain.ColdChain;
 using Forge.Domain.Colonies;
@@ -117,6 +118,8 @@ public sealed class SimulationHostedServiceTests
                 ModeledDockBays = 4,
                 InitialInboundRate = options.InitialArrivalRatePerHour,
                 InitialDemandMultiplier = options.DemandMultiplier,
+                // Keep legacy Poisson for these unit tests (train scheduler disabled).
+                InitialTrainsPerDay = 0,
             });
 
         var arrivals = new ArrivalGenerator(gateway, options.ArrivalSeed, catalog.GelTypes, catalog.DockBays);
@@ -133,9 +136,16 @@ public sealed class SimulationHostedServiceTests
             catalog,
             options,
             operatorParameters,
+            new NullTickState(),
             wall.Now);
 
         return (host, gateway, clock, wall);
+    }
+
+    private sealed class NullTickState : ITickStateProvider
+    {
+        public Task<TickState?> GetTickStateAsync(CancellationToken ct = default) =>
+            Task.FromResult<TickState?>(null);
     }
 
     [Fact]

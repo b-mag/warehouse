@@ -449,6 +449,7 @@ internal static partial class TickStages
                 .OrderBy(t => t.Type == WarehouseTaskType.PutAway ? 0 : 1)
                 .ThenBy(t => t.Id));
 
+        int newAssignmentsThisTick = 0;
         foreach (var agent in agents)
         {
             if (queue.Count == 0)
@@ -464,6 +465,11 @@ internal static partial class TickStages
             if (maxActiveAgents > 0 && link.Count >= maxActiveAgents)
             {
                 break; // operator's WORKERS-ON-SHIFT cap reached for this tick
+            }
+
+            if (newAssignmentsThisTick >= VisualSimulationConstants.MaxNewTaskAssignmentsPerTick)
+            {
+                break; // stagger breakroom → floor so not everyone rushes out on one tick
             }
 
             // Keep pulling until this agent gets a workable task (or the queue is empty).
@@ -499,6 +505,7 @@ internal static partial class TickStages
                 mutatedTasks.Add(task);
                 mutatedAgents.Add(agent);
                 assigned++;
+                newAssignmentsThisTick++;
                 break; // this agent is busy
             }
         }

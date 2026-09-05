@@ -1,3 +1,4 @@
+using Forge.Domain.Gels;
 using Forge.Domain.Vessels;
 
 namespace Forge.Application.Simulation;
@@ -6,14 +7,17 @@ internal static partial class TickStages
 {
     /// <summary>
     /// Advance engine-owned starship phases: Away → Approaching → Docked/Unloading → Loading →
-    /// Departing → Away. When a ship hits capacity it departs immediately (visual fly-out), clears
-    /// cargo, and later approaches again. Dock berths are capped by <paramref name="openDockBays"/>.
+    /// Departing → Away. ~50% of visits arrive with inbound produce that must fully unload before
+    /// outbound Loading. Full ships depart immediately; partially loaded ships depart after a
+    /// minimum dwell. Dock berths are capped by <paramref name="openDockBays"/>. Visit cadence
+    /// across a simulated day is driven by <paramref name="shipsPerDay"/>.
     /// </summary>
     public static void StarshipLifecycle(
         TickState state,
         DateTimeOffset now,
         TimeSpan delta,
-        int openDockBays)
+        int openDockBays,
+        double shipsPerDay = 4.0)
     {
         ArgumentNullException.ThrowIfNull(state);
 
@@ -22,12 +26,11 @@ internal static partial class TickStages
             return;
         }
 
-        EnsureRuntimes(state, now);
+        EnsureRuntimes(state, now, shipsPerDay);
 
         var ships = Ordered(state.Starships, s => s.Id);
         var runtimes = state.StarshipRuntimes;
 
-        // Occupied berths (Docked / Unloading / Loading).
         var occupied = new HashSet<int>();
         foreach (var ship in ships)
         {
@@ -43,6 +46,8 @@ internal static partial class TickStages
             }
         }
 
+        TimeSpan awayDuration = AwayDurationFor(shipsPerDay, ships.Count);
+
         foreach (var ship in ships)
         {
             if (!runtimes.TryGetValue(ship.Id, out var rt))
@@ -56,9 +61,8 @@ internal static partial class TickStages
             {
                 case StarshipPhases.Away:
                 {
-                    // Stagger re-entry slightly by ship id so berths don't all fill on the same tick.
-                    var stagger = TimeSpan.FromSeconds(StableGuidFold(ship.Id.Value) % 45);
-                    if (elapsed < VisualSimulationConstants.AwayDuration + stagger)
+                    var stagger = TimeSpan.FromSeconds(StableGuidFold(ship.Id.Value) % 90);
+                    if (elapsed < awayDuration + stagger)
                     {
                         break;
                     }
@@ -69,27 +73,28 @@ internal static partial class TickStages
                         break;
                     }
 
-                    // ~1/3 of arrivals bring inbound cargo to unload (deterministic per ship+cycle).
-                    uint fold = StableGuidFold(ship.Id.Value) ^ (uint)(now.UtcTicks / TimeSpan.TicksPerMinute);
-                    int inbound = (fold % 3) == 0
-                        ? (int)(1 + (fold % (uint)Math.Max(1, VisualSimulationConstants.StarshipCargoCapacityPallets / 4)))
-                        : 0;
-
                     EnterPhase(rt, StarshipPhases.Approaching, now);
                     rt.DockIndex = berth;
-                    rt.UnloadRemaining = inbound;
                     occupied.Add(berth);
+                    BeginVisitCargo(ship, rt, now);
                     break;
                 }
 
                 case StarshipPhases.Approaching:
                 {
+                    if (rt.NeedsInboundMaterialization ||
+                        (rt.PendingInboundLotCount > 0 && !rt.InboundCargoMaterialized))
+                    {
+                        rt.NeedsInboundMaterialization = true;
+                        break;
+                    }
+
                     if (elapsed < VisualSimulationConstants.ApproachDuration)
                     {
                         break;
                     }
 
-                    if (rt.UnloadRemaining > 0)
+                    if (rt.UnloadRemaining > 0 || rt.InboundLotIds.Count > 0)
                     {
                         EnterPhase(rt, StarshipPhases.Unloading, now);
                     }
@@ -103,17 +108,16 @@ internal static partial class TickStages
 
                 case StarshipPhases.Unloading:
                 {
-                    // Phase-1 interim: drain inbound cargo in the lifecycle until worker-unload tasks
-                    // fully own this path. Keeps the phase visible without blocking the load story.
-                    if (rt.UnloadRemaining > 0)
-                    {
-                        rt.UnloadRemaining = Math.Max(
-                            0,
-                            rt.UnloadRemaining - VisualSimulationConstants.MaxPalletsLoadedPerTick);
-                    }
+                    int remaining = CountShipInboundRemaining(state, rt);
+                    rt.UnloadRemaining = remaining;
+                    _ = ship.SetLoadedQuantity(Math.Min(ship.CargoCapacity, remaining));
 
-                    if (rt.UnloadRemaining <= 0)
+                    // Fully unloaded → clear inbound markers and open for colony outbound load.
+                    if (remaining <= 0 &&
+                        (rt.InboundCargoMaterialized || rt.PendingInboundLotCount == 0))
                     {
+                        rt.InboundLotIds.Clear();
+                        _ = ship.SetLoadedQuantity(0);
                         EnterPhase(rt, StarshipPhases.Loading, now);
                     }
 
@@ -123,20 +127,20 @@ internal static partial class TickStages
                 case StarshipPhases.Docked:
                 case StarshipPhases.Loading:
                 {
-                    // Full ship always departs — this is the fix for stuck 500/500 Docked.
                     if (ship.RemainingCapacity <= 0)
                     {
                         EnterPhase(rt, StarshipPhases.Departing, now);
                         break;
                     }
 
-                    // Idle / no more demand after a minimum dwell → depart partially loaded.
+                    // Idle / partial depart: after min dwell AND a readable cargo, leave even if
+                    // not full so colony ships don't wait forever for a full hull.
                     if (rt.Phase == StarshipPhases.Loading &&
                         elapsed >= VisualSimulationConstants.MinLoadingDwell &&
-                        ship.LoadedQuantity > 0 &&
-                        ship.RemainingCapacity == ship.CargoCapacity)
+                        ship.LoadedQuantity >= VisualSimulationConstants.MinDepartLoadedPallets)
                     {
-                        // LoadedQuantity > 0 && Remaining == Capacity is impossible; keep for clarity.
+                        EnterPhase(rt, StarshipPhases.Departing, now);
+                        break;
                     }
 
                     if (rt.Phase == StarshipPhases.Docked)
@@ -157,6 +161,10 @@ internal static partial class TickStages
                     ship.ClearCargo();
                     rt.DockIndex = -1;
                     rt.UnloadRemaining = 0;
+                    rt.InboundLotIds.Clear();
+                    rt.InboundCargoMaterialized = false;
+                    rt.NeedsInboundMaterialization = false;
+                    rt.PendingInboundLotCount = 0;
                     EnterPhase(rt, StarshipPhases.Away, now);
                     break;
                 }
@@ -172,19 +180,77 @@ internal static partial class TickStages
             return false;
         }
 
-        return rt.Phase == StarshipPhases.Loading && rt.DockIndex >= 0;
+        // Outbound load only after inbound produce (if any) is fully off the ship.
+        return rt.Phase == StarshipPhases.Loading &&
+               rt.DockIndex >= 0 &&
+               rt.UnloadRemaining <= 0;
     }
 
-    private static void EnsureRuntimes(TickState state, DateTimeOffset now)
+    private static void BeginVisitCargo(Starship ship, StarshipRuntime rt, DateTimeOffset now)
+    {
+        rt.InboundLotIds.Clear();
+        rt.InboundCargoMaterialized = false;
+        rt.NeedsInboundMaterialization = false;
+        rt.PendingInboundLotCount = 0;
+        rt.UnloadRemaining = 0;
+        ship.ClearCargo();
+
+        // Deterministic ~50% of visits bring produce (stable per ship + sim hour).
+        uint fold = StableGuidFold(ship.Id.Value) ^ (uint)(now.UtcTicks / TimeSpan.TicksPerHour);
+        bool bringsProduce = (fold % 100) < (uint)(VisualSimulationConstants.ShipInboundProduceChance * 100);
+        if (!bringsProduce)
+        {
+            return;
+        }
+
+        int span = VisualSimulationConstants.MaxShipInboundPallets -
+                   VisualSimulationConstants.MinShipInboundPallets + 1;
+        int amount = VisualSimulationConstants.MinShipInboundPallets + (int)(fold % (uint)span);
+        amount = Math.Min(amount, ship.CargoCapacity);
+
+        rt.PendingInboundLotCount = amount;
+        rt.UnloadRemaining = amount;
+        rt.NeedsInboundMaterialization = true;
+        _ = ship.SetLoadedQuantity(amount);
+    }
+
+    private static int CountShipInboundRemaining(TickState state, StarshipRuntime rt)
+    {
+        int remaining = 0;
+        for (int i = 0; i < rt.InboundLotIds.Count; i++)
+        {
+            var id = rt.InboundLotIds[i];
+            if (IsLotInList(state.InboundQueueLotIds, id) ||
+                IsLotInList(state.InTransitLotIds, id))
+            {
+                remaining++;
+            }
+        }
+
+        return remaining;
+    }
+
+    private static TimeSpan AwayDurationFor(double shipsPerDay, int shipCount)
+    {
+        int fleet = Math.Max(1, shipCount);
+        double visits = Math.Max(0.25, shipsPerDay);
+        // Space fleet visits across ~16 operating hours.
+        double hoursBetween = (16.0 / visits) * fleet;
+        hoursBetween = Math.Clamp(hoursBetween, 0.25, 12.0);
+        return TimeSpan.FromHours(hoursBetween);
+    }
+
+    private static void EnsureRuntimes(TickState state, DateTimeOffset now, double shipsPerDay)
     {
         int i = 0;
+        var away = AwayDurationFor(shipsPerDay, state.Starships.Count);
         foreach (var ship in Ordered(state.Starships, s => s.Id))
         {
+            int idx = i;
             state.StarshipRuntimes.GetOrAdd(ship.Id, _ => new StarshipRuntime
             {
                 Phase = StarshipPhases.Away,
-                // Stagger initial Away so ships approach one after another at startup.
-                PhaseEnteredAt = now - VisualSimulationConstants.AwayDuration + TimeSpan.FromSeconds(i * 20),
+                PhaseEnteredAt = now - away + TimeSpan.FromMinutes(idx * 15),
                 DockIndex = -1,
                 UnloadRemaining = 0,
             });
