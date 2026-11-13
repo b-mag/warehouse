@@ -8,4 +8,6 @@ public sealed record StarshipDto(
     int Capacity,
     int Loaded,
     Guid DestinationColony,
-    IReadOnlyList<LoadingWindowDto> Windows);
+    IReadOnlyList<LoadingWindowDto> Windows,
+    string Phase,
+    int DockIndex);

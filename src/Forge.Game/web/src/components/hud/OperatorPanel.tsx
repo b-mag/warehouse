@@ -47,7 +47,8 @@ export function OperatorPanel({ parameters, connected }: OperatorPanelProps) {
       [OperatorParameterKey.SimSpeed]: String(parameters.simSpeed),
       [OperatorParameterKey.WorkersOnShift]: String(parameters.workersOnShift),
       [OperatorParameterKey.OpenDockBays]: String(parameters.openDockBays),
-      [OperatorParameterKey.InboundRate]: String(parameters.inboundRate),
+      [OperatorParameterKey.TrainsPerDay]: String(parameters.trainsPerDay ?? 1),
+      [OperatorParameterKey.ShipsPerDay]: String(parameters.shipsPerDay ?? 4),
       [OperatorParameterKey.DemandMultiplier]: String(
         parameters.demandMultiplier,
       ),
@@ -87,7 +88,7 @@ export function OperatorPanel({ parameters, connected }: OperatorPanelProps) {
         <div className="flex flex-col gap-3">
           <NumberControl
             label="Simulation speed"
-            hint="0 = paused, 1 = real-time, >1 = accelerated"
+            hint="default 60 = 1 wall sec → 1 sim min (day = 24 wall min)"
             paramKey={OperatorParameterKey.SimSpeed}
             step={0.25}
             min={0}
@@ -133,17 +134,38 @@ export function OperatorPanel({ parameters, connected }: OperatorPanelProps) {
             onCommit={(v) => submit(OperatorParameterKey.OpenDockBays, v)}
           />
           <NumberControl
-            label="Inbound arrival rate"
-            paramKey={OperatorParameterKey.InboundRate}
-            step={0.5}
+            label="Train shipments per day"
+            hint="how often inbound trains bring product (sim day)"
+            paramKey={OperatorParameterKey.TrainsPerDay}
+            step={1}
             min={0}
-            value={draft[OperatorParameterKey.InboundRate] ?? ""}
-            pending={!!pending[OperatorParameterKey.InboundRate]}
+            value={draft[OperatorParameterKey.TrainsPerDay] ?? ""}
+            pending={!!pending[OperatorParameterKey.TrainsPerDay]}
             disabled={disabled}
             onChange={(v) =>
-              setDraft((d) => ({ ...d, [OperatorParameterKey.InboundRate]: v }))
+              setDraft((d) => ({
+                ...d,
+                [OperatorParameterKey.TrainsPerDay]: v,
+              }))
             }
-            onCommit={(v) => submit(OperatorParameterKey.InboundRate, v)}
+            onCommit={(v) => submit(OperatorParameterKey.TrainsPerDay, v)}
+          />
+          <NumberControl
+            label="Ships per day"
+            hint="~50% arrive with produce to unload, then load for colony"
+            paramKey={OperatorParameterKey.ShipsPerDay}
+            step={1}
+            min={0}
+            value={draft[OperatorParameterKey.ShipsPerDay] ?? ""}
+            pending={!!pending[OperatorParameterKey.ShipsPerDay]}
+            disabled={disabled}
+            onChange={(v) =>
+              setDraft((d) => ({
+                ...d,
+                [OperatorParameterKey.ShipsPerDay]: v,
+              }))
+            }
+            onCommit={(v) => submit(OperatorParameterKey.ShipsPerDay, v)}
           />
           <NumberControl
             label="Colony demand multiplier"

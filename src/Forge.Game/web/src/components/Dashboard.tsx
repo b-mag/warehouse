@@ -15,6 +15,7 @@ import { ConnectionStatus } from "@/components/hud/ConnectionStatus";
 import { EventLog } from "@/components/hud/EventLog";
 import { MetricsHud } from "@/components/hud/MetricsHud";
 import { OperatorPanel } from "@/components/hud/OperatorPanel";
+import { SimClockHud } from "@/components/hud/SimClockHud";
 import { SceneErrorBoundary } from "@/components/scene/SceneErrorBoundary";
 import { useForge } from "@/lib/ForgeProvider";
 
@@ -57,6 +58,7 @@ export function Dashboard() {
         <div className="flex items-start justify-between gap-4">
           <div className="flex flex-col gap-3">
             <ConnectionStatus status={state.status} error={state.lastError} />
+            <SimClockHud />
             <MetricsHud metrics={snapshot?.metrics ?? null} />
           </div>
           <div className="w-72">

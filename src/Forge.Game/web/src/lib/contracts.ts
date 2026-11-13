@@ -45,6 +45,8 @@ export interface AgentDto {
   y: number;
   pathCells: CellDto[];
   cellsPerSecond: number;
+  phase: string;
+  carryingLotId: string | null;
 }
 
 /** Mirrors Forge.Contracts.Dtos.LoadingWindowDto. */
@@ -62,6 +64,8 @@ export interface StarshipDto {
   loaded: number;
   destinationColony: string;
   windows: LoadingWindowDto[];
+  phase: string;
+  dockIndex: number;
 }
 
 /** Mirrors Forge.Contracts.Dtos.BacklogMetricsDto. */
@@ -82,6 +86,16 @@ export interface OperatorParameterStateDto {
   inboundRate: number;
   demandMultiplier: number;
   slottingStrategy: string;
+  trainsPerDay: number;
+  shipsPerDay: number;
+}
+
+/** Mirrors Forge.Contracts.Dtos.TrainDto — inbound rail consist lifecycle. */
+export interface TrainDto {
+  id: string;
+  phase: string;
+  carCount: number;
+  lotIds: string[];
 }
 
 /** Mirrors Forge.Contracts.Dtos.SimulationSnapshotDto (Req 23.3). */
@@ -92,6 +106,29 @@ export interface SimulationSnapshotDto {
   starships: StarshipDto[];
   metrics: BacklogMetricsDto;
   parameters: OperatorParameterStateDto;
+  /** Authoritative simulated clock (ISO-8601). */
+  simulatedAt: string;
+  train: TrainDto | null;
+  /** Lots still on rail / receiving (hidden from zone cubes until put-away). */
+  inboundQueueLotIds?: string[];
+  /** Lots carried by agents (hidden from zone cubes while in transit). */
+  inTransitLotIds?: string[];
+}
+
+/** Positions payload pushed frequently for smooth interpolation (Req 23.4). */
+export interface PositionsUpdateDto {
+  agents: AgentDto[];
+  starships: StarshipDto[];
+  inboundQueueLotIds: string[];
+  inTransitLotIds: string[];
+  train?: TrainDto | null;
+  simulatedAt?: string | null;
+}
+
+/** Inventory projection for holding-area cubes / zone stored counts. */
+export interface InventoryUpdateDto {
+  zones: TemperatureZoneDto[];
+  lots: GelLotDto[];
 }
 
 /** Mirrors Forge.Contracts.OperatorParameters.OperatorParameterDto (the PUT body). */
@@ -111,6 +148,8 @@ export const OperatorParameterKey = {
   InboundRate: "inbound-rate",
   DemandMultiplier: "demand-multiplier",
   SlottingStrategy: "slotting-strategy",
+  TrainsPerDay: "trains-per-day",
+  ShipsPerDay: "ships-per-day",
 } as const;
 
 export type OperatorParameterKeyValue =

@@ -17,14 +17,21 @@ namespace Forge.Application.OperatorParameters;
 /// </summary>
 public sealed class OperatorParameterState
 {
-    /// <summary>Default simulation speed when no initial value is configured: real-time (Req 20.2).</summary>
-    public const double DefaultSimSpeed = 1.0;
+    /// <summary>Default simulation speed when no initial value is configured: accelerated demo pace.</summary>
+    public const double DefaultSimSpeed = 60.0; // 1 wall-second = 1 sim-minute; day ≈ 24 wall-minutes
 
-    /// <summary>Default inbound arrival rate when no initial value is configured (Req 20.5).</summary>
-    public const double DefaultInboundRate = 1.0;
+
+    /// <summary>Default inbound arrival rate when no initial value is configured (Req 20.5). Unused when trains-per-day &gt; 0.</summary>
+    public const double DefaultInboundRate = 0.0;
 
     /// <summary>Default colony demand multiplier when no initial value is configured (Req 20.6).</summary>
     public const double DefaultDemandMultiplier = 1.0;
+
+    /// <summary>Default trains per simulated day (production-planet replenishment cadence).</summary>
+    public const double DefaultTrainsPerDay = 1.0;
+
+    /// <summary>Default outbound ship visits per simulated day.</summary>
+    public const double DefaultShipsPerDay = 4.0;
 
     /// <summary>Default slotting strategy when no initial value is configured (Req 20.7).</summary>
     public const string DefaultSlottingStrategy = SlottingStrategyKey.VelocityAffinity;
@@ -74,11 +81,17 @@ public sealed class OperatorParameterState
     /// <summary>Current number of open dock bays (Req 20.4).</summary>
     public int OpenDockBays { get; private set; }
 
-    /// <summary>Current inbound arrival rate (Req 20.5).</summary>
+    /// <summary>Current inbound arrival rate (Req 20.5). Legacy; trains-per-day is preferred.</summary>
     public double InboundRate { get; private set; }
 
     /// <summary>Current colony demand multiplier (Req 20.6).</summary>
     public double DemandMultiplier { get; private set; }
+
+    /// <summary>Scheduled inbound train visits per simulated day.</summary>
+    public double TrainsPerDay { get; private set; }
+
+    /// <summary>Scheduled outbound starship visits per simulated day.</summary>
+    public double ShipsPerDay { get; private set; }
 
     /// <summary>Current active slotting-strategy key (Req 20.7).</summary>
     public string SlottingStrategy { get; private set; } = DefaultSlottingStrategy;
@@ -95,6 +108,8 @@ public sealed class OperatorParameterState
         OpenDockBays = _options.InitialOpenDockBays ?? _options.ModeledDockBays;
         InboundRate = _options.InitialInboundRate ?? DefaultInboundRate;
         DemandMultiplier = _options.InitialDemandMultiplier ?? DefaultDemandMultiplier;
+        TrainsPerDay = _options.InitialTrainsPerDay ?? DefaultTrainsPerDay;
+        ShipsPerDay = _options.InitialShipsPerDay ?? DefaultShipsPerDay;
         SlottingStrategy = _options.InitialSlottingStrategy ?? DefaultSlottingStrategy;
     }
 
@@ -110,6 +125,10 @@ public sealed class OperatorParameterState
 
     internal void SetDemandMultiplier(double value) => DemandMultiplier = value;
 
+    internal void SetTrainsPerDay(double value) => TrainsPerDay = value;
+
+    internal void SetShipsPerDay(double value) => ShipsPerDay = value;
+
     internal void SetSlottingStrategy(string value) => SlottingStrategy = value;
 
     /// <summary>
@@ -123,5 +142,7 @@ public sealed class OperatorParameterState
         OpenDockBays,
         InboundRate,
         DemandMultiplier,
-        SlottingStrategy);
+        SlottingStrategy,
+        TrainsPerDay,
+        ShipsPerDay);
 }

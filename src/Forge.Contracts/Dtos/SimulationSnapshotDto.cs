@@ -9,4 +9,10 @@ public sealed record SimulationSnapshotDto(
     IReadOnlyList<AgentDto> Agents,
     IReadOnlyList<StarshipDto> Starships,
     BacklogMetricsDto Metrics,
-    OperatorParameterStateDto Parameters);
+    OperatorParameterStateDto Parameters,
+    DateTimeOffset SimulatedAt,
+    TrainDto? Train,
+    /// <summary>Lots still on the inbound rail / receiving queue (not yet in a zone cube).</summary>
+    IReadOnlyList<Guid> InboundQueueLotIds,
+    /// <summary>Lots carried by agents between rail and storage (or pick→ship).</summary>
+    IReadOnlyList<Guid> InTransitLotIds);

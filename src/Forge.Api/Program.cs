@@ -47,6 +47,10 @@ var operatorOptions = new OperatorParameterOptions
 {
     WorkerMax = 25,
     ModeledDockBays = infrastructureOptions.DockBayCount,
+    InitialSimSpeed = 60.0,
+    InitialTrainsPerDay = 1.0,
+    InitialShipsPerDay = 4.0,
+    InitialInboundRate = 0.0,
 };
 
 // ---- WMS Core + input driver DI --------------------------------------------------------------
@@ -80,25 +84,55 @@ builder.Services.AddSingleton<ISimulationClientNotifier, SignalRClientNotifier>(
 builder.Services.AddSingleton<IForecastReviewStore, InMemoryForecastReviewStore>();
 // Periodically repopulate the Simulation catalog so newly-arrived lots become temperature targets.
 builder.Services.AddHostedService<CatalogRefreshService>();
+// Broadcast agent/starship positions at a fixed wall interval so the web renderer can animate.
+builder.Services.AddHostedService<PositionsUpdateHostedService>();
+builder.Services.AddHostedService<InventoryUpdateHostedService>();
 
 // ---- Transport ------------------------------------------------------------------------------
 builder.Services.AddControllers();
 builder.Services.AddSignalR();
 
 // ---- CORS for the Game web client -----------------------------------------------------------
-// The Next.js web client runs on a different origin (default http://localhost:3000) and calls the
-// engine REST endpoints + SignalR hub cross-origin, so the engine must return CORS headers. SignalR
-// negotiate/websocket requires AllowCredentials, which is incompatible with AllowAnyOrigin, so we
-// allow an explicit configured origin list (Forge:WebClientOrigins; defaults to Next.js dev ports).
-var webClientOrigins =
+// The Next.js web client may call the engine cross-origin when NEXT_PUBLIC_FORGE_API is set.
+// Default Next setup proxies via same-origin rewrites (no CORS needed). When calling the
+// engine directly, negotiate/websocket requires AllowCredentials (incompatible with
+// AllowAnyOrigin). In Development we accept any localhost / 127.0.0.1 origin so alternate
+// Next ports (3001, …) keep working; otherwise use Forge:WebClientOrigins.
+var configuredOrigins =
     builder.Configuration.GetSection("Forge:WebClientOrigins").Get<string[]>()
     ?? new[] { "http://localhost:3000", "https://localhost:3000" };
 builder.Services.AddCors(options =>
     options.AddPolicy("ForgeWebClient", policy =>
-        policy.WithOrigins(webClientOrigins)
-              .AllowAnyHeader()
+    {
+        if (builder.Environment.IsDevelopment())
+        {
+            policy.SetIsOriginAllowed(static origin =>
+                {
+                    if (string.IsNullOrWhiteSpace(origin))
+                    {
+                        return false;
+                    }
+
+                    try
+                    {
+                        var host = new Uri(origin).Host;
+                        return host is "localhost" or "127.0.0.1";
+                    }
+                    catch (UriFormatException)
+                    {
+                        return false;
+                    }
+                });
+        }
+        else
+        {
+            policy.WithOrigins(configuredOrigins);
+        }
+
+        policy.AllowAnyHeader()
               .AllowAnyMethod()
-              .AllowCredentials()));
+              .AllowCredentials();
+    }));
 
 var app = builder.Build();
 

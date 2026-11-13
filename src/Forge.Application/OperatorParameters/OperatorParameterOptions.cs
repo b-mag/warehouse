@@ -33,11 +33,17 @@ public sealed class OperatorParameterOptions
     /// <summary>Initial open dock bays (Req 20.4). Defaults to <see cref="ModeledDockBays"/> when null.</summary>
     public int? InitialOpenDockBays { get; init; }
 
-    /// <summary>Initial inbound arrival rate (Req 20.5). Defaults to unit rate (1.0) when null.</summary>
+    /// <summary>Initial inbound arrival rate (Req 20.5). Defaults to 0 when trains-per-day drives inbound.</summary>
     public double? InitialInboundRate { get; init; }
 
     /// <summary>Initial colony demand multiplier (Req 20.6). Defaults to unit multiplier (1.0) when null.</summary>
     public double? InitialDemandMultiplier { get; init; }
+
+    /// <summary>Initial trains per simulated day. Defaults to 1 when null.</summary>
+    public double? InitialTrainsPerDay { get; init; }
+
+    /// <summary>Initial ships per simulated day. Defaults to 4 when null.</summary>
+    public double? InitialShipsPerDay { get; init; }
 
     /// <summary>Initial slotting strategy key (Req 20.7). Defaults to velocity-affinity when null.</summary>
     public string? InitialSlottingStrategy { get; init; }

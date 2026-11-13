@@ -1,5 +1,6 @@
 using Forge.Application.Abstractions.Repositories;
 using Forge.Application.Docks;
+using Forge.Application.Abstractions;
 using Forge.Application.OperatorParameters;
 using Forge.Application.Simulation;
 using Forge.Contracts.Dtos;
@@ -46,6 +47,7 @@ public sealed class GetSimulationSnapshotHandler
     private readonly IZoneRepository _zones;
     private readonly IGelLotRepository _lots;
     private readonly ITickStateProvider _tickState;
+    private readonly IClock _clock;
     private readonly WarehouseMetrics _metrics;
     private readonly DockScheduler _dockScheduler;
     private readonly DockBayId _primaryDockBay;
@@ -71,6 +73,7 @@ public sealed class GetSimulationSnapshotHandler
         IZoneRepository zones,
         IGelLotRepository lots,
         ITickStateProvider tickState,
+        IClock clock,
         WarehouseMetrics metrics,
         DockScheduler dockScheduler,
         DockBayId primaryDockBay,
@@ -79,6 +82,7 @@ public sealed class GetSimulationSnapshotHandler
         _zones = zones ?? throw new ArgumentNullException(nameof(zones));
         _lots = lots ?? throw new ArgumentNullException(nameof(lots));
         _tickState = tickState ?? throw new ArgumentNullException(nameof(tickState));
+        _clock = clock ?? throw new ArgumentNullException(nameof(clock));
         _metrics = metrics ?? throw new ArgumentNullException(nameof(metrics));
         _dockScheduler = dockScheduler ?? throw new ArgumentNullException(nameof(dockScheduler));
         _primaryDockBay = primaryDockBay;
@@ -103,18 +107,34 @@ public sealed class GetSimulationSnapshotHandler
         // deployments still return a valid snapshot). Otherwise project the live agents/starships.
         var agents = tickState is null
             ? Array.Empty<AgentDto>()
-            : tickState.Agents.Select(ToAgentDto).ToArray();
+            : tickState.Agents.Select(a => ToAgentDto(tickState, a)).ToArray();
 
         var starships = tickState is null
             ? Array.Empty<StarshipDto>()
-            : tickState.Starships.Select(ToStarshipDto).ToArray();
+            : ToStarshipsDto(tickState);
 
         var zoneDtos = zones.Select(ToZoneDto).ToArray();
-        var lotDtos = lots.Select(ToLotDto).ToArray();
+        // Active inventory only — zero-qty lots are archived and excluded from the live view.
+        var lotDtos = lots.Where(l => l.Quantity > 0).Select(ToLotDto).ToArray();
 
         // Read-only projections: ToDto reads current values only and never mutates the components.
         var metrics = _metrics.ToDto(_dockScheduler, _primaryDockBay);
         var parameters = _parameters.ToDto();
+
+        TrainDto? trainDto = null;
+        IReadOnlyList<Guid> inbound = Array.Empty<Guid>();
+        IReadOnlyList<Guid> inTransit = Array.Empty<Guid>();
+        if (tickState is not null)
+        {
+            var tr = tickState.Train;
+            trainDto = new TrainDto(
+                Id: tr.Id,
+                Phase: tr.Phase,
+                CarCount: tr.CarCount,
+                LotIds: tr.LotIds.Select(l => l.Value).ToArray());
+            inbound = tickState.InboundQueueLotIds.Select(l => l.Value).ToArray();
+            inTransit = tickState.InTransitLotIds.Select(l => l.Value).ToArray();
+        }
 
         return new SimulationSnapshotDto(
             Zones: zoneDtos,
@@ -122,7 +142,11 @@ public sealed class GetSimulationSnapshotHandler
             Agents: agents,
             Starships: starships,
             Metrics: metrics,
-            Parameters: parameters);
+            Parameters: parameters,
+            SimulatedAt: _clock.Now,
+            Train: trainDto,
+            InboundQueueLotIds: inbound,
+            InTransitLotIds: inTransit);
     }
 
     // ---- Pure domain → DTO projections (no mutation). ----
@@ -143,19 +167,74 @@ public sealed class GetSimulationSnapshotHandler
         AtRisk: lot.AtRisk,
         ZoneId: lot.AssignedZoneId is { } zoneId ? zoneId.Value : null);
 
-    private static AgentDto ToAgentDto(Agent agent) => new(
+    private static AgentDto ToAgentDto(TickState tickState, Agent agent) => new(
         Id: agent.Id.Value,
         X: agent.Position.X,
         Y: agent.Position.Y,
         PathCells: agent.CurrentPath is { } path
             ? path.Cells.Select(c => new CellDto(c.X, c.Y)).ToArray()
             : Array.Empty<CellDto>(),
-        CellsPerSecond: agent.CellsPerSecond);
+        CellsPerSecond: agent.CellsPerSecond,
+        Phase: "Active",
+        CarryingLotId: TryCarryingLotId(tickState, agent.Id));
 
-    private static StarshipDto ToStarshipDto(Starship starship) => new(
+    private static Guid? TryCarryingLotId(TickState tickState, AgentId agentId)
+    {
+        if (!tickState.AgentTasks.TryGetValue(agentId, out var taskId))
+        {
+            return null;
+        }
+
+        if (tickState.PutAwayTaskLotLinks.TryGetValue(taskId, out var lotId))
+        {
+            for (int i = 0; i < tickState.InTransitLotIds.Count; i++)
+            {
+                if (tickState.InTransitLotIds[i].Equals(lotId))
+                {
+                    return lotId.Value;
+                }
+            }
+
+            return null;
+        }
+
+        if (tickState.PickTaskLotLinks.TryGetValue(taskId, out var pickLot))
+        {
+            for (int i = 0; i < tickState.InTransitLotIds.Count; i++)
+            {
+                if (tickState.InTransitLotIds[i].Equals(pickLot))
+                {
+                    return pickLot.Value;
+                }
+            }
+
+            return null;
+        }
+
+        return null;
+    }
+
+    private static StarshipDto ToStarshipDto(Starship starship, int dockIndex, string phase) => new(
         Id: starship.Id.Value,
         Capacity: starship.CargoCapacity,
         Loaded: starship.LoadedQuantity,
         DestinationColony: starship.Destination.Value,
-        Windows: starship.Windows.Select(w => new LoadingWindowDto(w.Start, w.End)).ToArray());
+        Windows: starship.Windows.Select(w => new LoadingWindowDto(w.Start, w.End)).ToArray(),
+        Phase: phase,
+        DockIndex: dockIndex);
+
+    private static IReadOnlyList<StarshipDto> ToStarshipsDto(TickState tickState)
+    {
+        return tickState.Starships
+            .OrderBy(s => s.Id)
+            .Select(ship =>
+            {
+                tickState.StarshipRuntimes.TryGetValue(ship.Id, out var rt);
+                return ToStarshipDto(
+                    ship,
+                    rt?.DockIndex ?? -1,
+                    rt?.Phase ?? StarshipPhases.Away);
+            })
+            .ToArray();
+    }
 }

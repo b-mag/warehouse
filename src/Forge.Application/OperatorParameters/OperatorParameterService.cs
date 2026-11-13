@@ -71,6 +71,8 @@ public sealed class OperatorParameterService
             OperatorParameterKey.InboundRate => ApplyInboundRate(change.Value),
             OperatorParameterKey.DemandMultiplier => ApplyDemandMultiplier(change.Value),
             OperatorParameterKey.SlottingStrategy => ApplySlottingStrategy(change.Value),
+            OperatorParameterKey.TrainsPerDay => ApplyTrainsPerDay(change.Value),
+            OperatorParameterKey.ShipsPerDay => ApplyShipsPerDay(change.Value),
             _ => DomainError.Validation(
                 $"Unknown operator parameter '{change.Key}'.",
                 change.Key),
@@ -141,6 +143,28 @@ public sealed class OperatorParameterService
 
         // Driver-routed: held in state for the demand simulator (wired in tasks 27/33) to read.
         _state.SetDemandMultiplier(value);
+        return Result.Success();
+    }
+
+    private Result ApplyTrainsPerDay(string raw)
+    {
+        if (!TryParseDouble(raw, out var value) || !OperatorParameterRanges.IsValidTrainsPerDay(value))
+        {
+            return Reject(OperatorParameterKey.TrainsPerDay, raw);
+        }
+
+        _state.SetTrainsPerDay(value);
+        return Result.Success();
+    }
+
+    private Result ApplyShipsPerDay(string raw)
+    {
+        if (!TryParseDouble(raw, out var value) || !OperatorParameterRanges.IsValidShipsPerDay(value))
+        {
+            return Reject(OperatorParameterKey.ShipsPerDay, raw);
+        }
+
+        _state.SetShipsPerDay(value);
         return Result.Success();
     }
 

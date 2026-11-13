@@ -8,4 +8,6 @@ public sealed record AgentDto(
     int X,
     int Y,
     IReadOnlyList<CellDto> PathCells,
-    double CellsPerSecond);
+    double CellsPerSecond,
+    string Phase,
+    Guid? CarryingLotId);

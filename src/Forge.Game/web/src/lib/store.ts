@@ -14,6 +14,7 @@
 
 import type {
   BacklogChangedEvent,
+  InventoryUpdateDto,
   LotExpiredEvent,
   OperatorParameterChangedEvent,
   SimulationSnapshotDto,
@@ -61,6 +62,7 @@ const MAX_EVENTS = 100;
 export type ForgeAction =
   | { type: "STATUS"; status: ConnectionStatus }
   | { type: "SNAPSHOT"; snapshot: SimulationSnapshotDto }
+  | { type: "INVENTORY_UPDATE"; update: InventoryUpdateDto }
   | { type: "LOT_EXPIRED"; event: LotExpiredEvent }
   | { type: "TEMPERATURE_EXCURSION"; event: TemperatureExcursionEvent }
   | { type: "BACKLOG_CHANGED"; event: BacklogChangedEvent }
@@ -99,6 +101,22 @@ export function forgeReducer(
         lastError: null,
         seq: state.seq + 1,
       };
+
+    case "INVENTORY_UPDATE": {
+      if (!state.snapshot) {
+        return { ...state, seq: state.seq + 1 };
+      }
+
+      return {
+        ...state,
+        snapshot: {
+          ...state.snapshot,
+          zones: action.update.zones,
+          lots: action.update.lots,
+        },
+        seq: state.seq + 1,
+      };
+    }
 
     case "LOT_EXPIRED": {
       const events = pushEvent(

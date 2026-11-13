@@ -100,7 +100,11 @@ public sealed class SimulationHubTests
         Agents: [],
         Starships: [],
         Metrics: new BacklogMetricsDto(0, 0, 0.0, 0.0, 0, 0.0),
-        Parameters: new OperatorParameterStateDto(1.0, 5, 2, 3.0, 1.0, "velocity"));
+        Parameters: new OperatorParameterStateDto(1.0, 5, 2, 3.0, 1.0, "velocity", 1.0, 4.0),
+        SimulatedAt: DateTimeOffset.UnixEpoch,
+        Train: null,
+        InboundQueueLotIds: [],
+        InTransitLotIds: []);
 
     [Fact]
     public async Task OnConnected_sends_snapshot_to_caller()

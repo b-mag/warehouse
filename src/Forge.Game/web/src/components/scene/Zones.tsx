@@ -16,6 +16,7 @@ import {
   BAND_COLOR,
   ZONE_SIZE,
   temperatureBand,
+  temperatureBandLabel,
   type ZonePlacement,
 } from "@/lib/layout";
 
@@ -35,6 +36,10 @@ export function Zones({ placements, lotsByZone }: ZonesProps) {
         const band = temperatureBand(zone);
         const lots = lotsByZone.get(zone.id) ?? [];
         const hasTrouble = lots.some((lot) => lot.isExpired || lot.atRisk);
+        // Prefer floor cubes (visible lots) so the label matches what you see; fall back to
+        // authoritative zone.stored once inventory catches up after put-away.
+        const floorQty = lots.reduce((sum, lot) => sum + (lot.quantity ?? 0), 0);
+        const storedQty = Math.max(zone.stored, floorQty);
         return (
           <group key={zone.id} position={[centerX, 0, centerZ]}>
             {/* Distinct trouble ring: a slightly larger emissive slab beneath the floor. */}
@@ -70,7 +75,7 @@ export function Zones({ placements, lotsByZone }: ZonesProps) {
               anchorX="center"
               anchorY="middle"
             >
-              {`${band} · ${zone.stored}/${zone.capacity}`}
+              {`${temperatureBandLabel(band)} · ${storedQty}/${zone.capacity}`}
             </Text>
           </group>
         );

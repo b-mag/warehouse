@@ -1,6 +1,7 @@
 using Forge.Application.Abstractions;
 using Forge.Application.Abstractions.Repositories;
 using Forge.Application.Loading;
+using Forge.Application.OperatorParameters;
 using Forge.Application.Simulation;
 using Forge.Domain.ColdChain;
 using Forge.Domain.Colonies;
@@ -151,27 +152,37 @@ public sealed class ApplyTickRulesHandlerTests
     }
 
     [Fact]
-    public async Task Stage3_idle_agent_is_dispatched_a_destination_and_moves()
+    public async Task Stage3_idle_agent_is_dispatched_toward_staging_bay_and_moves()
     {
-        // The dispatch step: an agent with NO assigned path is handed a patrol destination, routed
-        // there, and advanced this tick — so the warehouse stays visibly in motion (the fix that made
-        // the agents actually travel). Verifies the agent leaves its start cell and its position stays
-        // on the (all-aisle) grid.
+        // Idle agents walk to the staging bay (not a random patrol ring) and stay there until work.
         var ctx = new TestContext();
-        var grid = new WarehouseGrid(16, 16); // all-aisle: every anchor is reachable
+        var grid = new WarehouseGrid(32, 32);
         var agent = new Agent(AgentId.New(), WorkerId.New(), new Cell(0, 0), cellsPerSecond: 2);
-        // NOTE: no AssignPath — the agent is idle and must be dispatched by the stage itself.
         ctx.TickState.Set(new TickState(grid, new[] { agent }, new ReservationLedger(), Array.Empty<Starship>()));
 
         var result = await ctx.Handler.ApplyTickRulesAsync(Delta);
 
         Assert.True(result.IsSuccess);
-        // It was dispatched a path and advanced off its start cell.
         Assert.NotEqual(new Cell(0, 0), agent.Position);
         Assert.InRange(agent.Position.X, 0, grid.Width - 1);
         Assert.InRange(agent.Position.Y, 0, grid.Height - 1);
         Assert.NotNull(agent.CurrentPath);
-        Assert.Equal(1, ctx.UnitOfWork.SaveCount); // the agent move was staged + committed
+        Assert.Equal(1, ctx.UnitOfWork.SaveCount);
+    }
+
+    [Fact]
+    public async Task Stage3_idle_agent_already_in_bay_stays_put()
+    {
+        var ctx = new TestContext();
+        var grid = new WarehouseGrid(32, 32);
+        var bay = new Cell(VisualGridLayout.IdleBayMinX, VisualGridLayout.IdleBayMinY);
+        var agent = new Agent(AgentId.New(), WorkerId.New(), bay, cellsPerSecond: 2);
+        ctx.TickState.Set(new TickState(grid, new[] { agent }, new ReservationLedger(), Array.Empty<Starship>()));
+
+        var result = await ctx.Handler.ApplyTickRulesAsync(Delta);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(bay, agent.Position);
     }
 
     [Fact]
@@ -317,17 +328,100 @@ public sealed class ApplyTickRulesHandlerTests
     private static WarehouseTask MakeTask(WarehouseTaskType type) =>
         WarehouseTask.Create(WarehouseTaskId.New(), type, new Cell(0, 0), new Cell(1, 0), TimeSpan.Zero).Value;
 
+    [Fact]
+    public async Task TaskExecution_assigns_unassigned_putaway_task_to_idle_agent()
+    {
+        var ctx = new TestContext();
+        var grid = new WarehouseGrid(8, 1); // all-aisle single row so (0,0)->(1,0) is routable
+        var agent = new Agent(AgentId.New(), WorkerId.New(), new Cell(0, 0), cellsPerSecond: 2);
+        ctx.TickState.Set(new TickState(grid, new[] { agent }, new ReservationLedger(), Array.Empty<Starship>()));
+
+        // A put-away task at destination (1,0), initially unassigned.
+        var task = MakeTask(WarehouseTaskType.PutAway);
+        ctx.Tasks.SeedUnassigned(task);
+
+        var result = await ctx.Handler.ApplyTickRulesAsync(Delta);
+
+        Assert.True(result.IsSuccess);
+        // The idle agent claimed the task: it is now assigned to that agent's worker and given a path.
+        Assert.Equal(agent.Worker, task.AssignedWorker);
+        Assert.NotNull(agent.CurrentPath);
+        // Backlog dropped to zero because the task is no longer unassigned.
+        Assert.Equal(0, ctx.Metrics.Receiving);
+    }
+
+    [Fact]
+    public async Task TaskExecution_completes_task_when_agent_reaches_destination_and_drains_backlog()
+    {
+        var ctx = new TestContext();
+        var grid = new WarehouseGrid(8, 1);
+        // Fast agent so it clears the single (0,0)->(1,0) step within one tick.
+        var agent = new Agent(AgentId.New(), WorkerId.New(), new Cell(0, 0), cellsPerSecond: 5);
+        ctx.TickState.Set(new TickState(grid, new[] { agent }, new ReservationLedger(), Array.Empty<Starship>()));
+
+        var task = MakeTask(WarehouseTaskType.PutAway); // destination (1,0)
+        ctx.Tasks.SeedUnassigned(task);
+
+        // Tick 1: assign + start moving toward the destination.
+        await ctx.Handler.ApplyTickRulesAsync(Delta);
+        // Tick 2: the agent has arrived at (1,0); the task completes.
+        var result = await ctx.Handler.ApplyTickRulesAsync(Delta);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(new Cell(1, 0), agent.Position);
+        Assert.Equal(Forge.Domain.Tasks.TaskStatus.Completed, task.Status);
+        Assert.Contains(ctx.EventBus.Published, e => e is TaskCompleted tc && tc.TaskId.Equals(task.Id));
+        // Inbound throughput registered the completed put-away lot.
+        Assert.True(ctx.Metrics.InboundThroughput > 0d);
+        Assert.Equal(0, ctx.Metrics.Receiving);
+    }
+
+    [Fact]
+    public async Task TaskBound_agent_is_not_hijacked_by_patrol_dispatch_and_completes_over_several_ticks()
+    {
+        // Regression: a task-bound agent used to be treated as "idle" by the movement stage the moment
+        // it reached its work cell, get dispatched a NEW patrol path, wander off, and therefore never
+        // satisfy the arrival check — so the task never completed and the backlog never drained (agents
+        // frozen "all over the map"). This drives multiple ticks and asserts the task actually completes
+        // and the agent is released (no lingering link, no patrol path).
+        var ctx = new TestContext();
+        var grid = new WarehouseGrid(16, 16);
+        // Slow agent so arrival takes more than one tick — exercising the multi-tick travel + the
+        // "hold on arrival until completion" behaviour rather than a same-tick complete.
+        var agent = new Agent(AgentId.New(), WorkerId.New(), new Cell(0, 0), cellsPerSecond: 0.5);
+        var state = new TickState(grid, new[] { agent }, new ReservationLedger(), Array.Empty<Starship>());
+        ctx.TickState.Set(state);
+
+        var task = MakeTask(WarehouseTaskType.PutAway); // destination (1,0), in-bounds/non-degenerate
+        ctx.Tasks.SeedUnassigned(task);
+
+        // Run enough ticks for the slow agent to travel to the work cell and complete.
+        for (var i = 0; i < 8; i++)
+        {
+            await ctx.Handler.ApplyTickRulesAsync(Delta);
+        }
+
+        Assert.Equal(Forge.Domain.Tasks.TaskStatus.Completed, task.Status);
+        Assert.Contains(ctx.EventBus.Published, e => e is TaskCompleted tc && tc.TaskId.Equals(task.Id));
+        // The agent was released: no lingering task link.
+        Assert.False(state.AgentTasks.ContainsKey(agent.Id));
+        Assert.Equal(0, ctx.Metrics.Receiving);
+    }
+
     // ---- Test harness ----
 
     private sealed class TestContext
     {
         public FakeLotRepository Lots { get; } = new();
+        public FakeZoneRepository Zones { get; } = new();
         public FakeOrderRepository Orders { get; } = new();
         public FakeTaskRepository Tasks { get; } = new();
         public FakeTickStateProvider TickState { get; } = new();
         public FakeEventBus EventBus { get; } = new();
         public FakeUnitOfWork UnitOfWork { get; } = new();
         public WarehouseMetrics Metrics { get; } = new();
+        public OperatorParameterState OperatorParameters { get; } =
+            new(new OperatorParameterOptions { WorkerMax = 25, ModeledDockBays = 4 });
         public ApplyTickRulesHandler Handler { get; }
 
         public TestContext()
@@ -335,11 +429,13 @@ public sealed class ApplyTickRulesHandlerTests
             Handler = new ApplyTickRulesHandler(
                 new FixedClock(Now),
                 Lots,
+                Zones,
                 Orders,
                 Tasks,
                 new PathPlannerAdapter(),
                 new StarshipLoadingService(),
                 Metrics,
+                OperatorParameters,
                 TickState,
                 UnitOfWork,
                 EventBus);
@@ -358,6 +454,10 @@ public sealed class ApplyTickRulesHandlerTests
         private TickState? _state;
         public void Set(TickState state) => _state = state;
         public Task<TickState?> GetTickStateAsync(CancellationToken ct = default) => Task.FromResult(_state);
+
+        public void EnqueueInboundPutAway(GelLotId lotId, WarehouseTaskId putAwayTaskId) { }
+
+        public void ApplyWorkerCount(int workersOnShift) { }
     }
 
     private sealed class FakeLotRepository : IGelLotRepository
@@ -378,6 +478,23 @@ public sealed class ApplyTickRulesHandlerTests
 
         public void Add(GelLot lot) => _lots.Add(lot);
         public void Update(GelLot lot) => Updated.Add(lot);
+        public void Remove(GelLot lot) => _lots.Remove(lot);
+    }
+
+    private sealed class FakeZoneRepository : IZoneRepository
+    {
+        private readonly List<TemperatureZone> _zones = new();
+
+        public void Seed(TemperatureZone zone) => _zones.Add(zone);
+
+        public Task<TemperatureZone?> GetByIdAsync(ZoneId id, CancellationToken ct = default) =>
+            Task.FromResult(_zones.FirstOrDefault(z => z.Id.Equals(id)));
+
+        public Task<IReadOnlyList<TemperatureZone>> ListAllAsync(CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<TemperatureZone>>(_zones.ToArray());
+
+        public void Add(TemperatureZone zone) => _zones.Add(zone);
+        public void Update(TemperatureZone zone) { }
     }
 
     private sealed class FakeOrderRepository : IOrderRepository
@@ -401,13 +518,8 @@ public sealed class ApplyTickRulesHandlerTests
     private sealed class FakeTaskRepository : ITaskRepository
     {
         private readonly List<WarehouseTask> _all = new();
-        private readonly List<WarehouseTask> _unassigned = new();
 
-        public void SeedUnassigned(WarehouseTask task)
-        {
-            _all.Add(task);
-            _unassigned.Add(task);
-        }
+        public void SeedUnassigned(WarehouseTask task) => _all.Add(task);
 
         public Task<WarehouseTask?> GetByIdAsync(WarehouseTaskId id, CancellationToken ct = default) =>
             Task.FromResult(_all.FirstOrDefault(t => t.Id.Equals(id)));
@@ -415,8 +527,13 @@ public sealed class ApplyTickRulesHandlerTests
         public Task<IReadOnlyList<WarehouseTask>> ListAllAsync(CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<WarehouseTask>>(_all.ToArray());
 
+        // A task is "unassigned" while it has no assigned worker and is not yet completed. Because the
+        // task-execution stage mutates the SAME task instances held here, this reflects assignment/
+        // completion immediately — exactly like the live EF-backed repository over a shared context.
         public Task<IReadOnlyList<WarehouseTask>> GetUnassignedAsync(CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<WarehouseTask>>(_unassigned.ToArray());
+            Task.FromResult<IReadOnlyList<WarehouseTask>>(
+                _all.Where(t => t.AssignedWorker is null
+                                && t.Status is not Forge.Domain.Tasks.TaskStatus.Completed).ToArray());
 
         public void Add(WarehouseTask task) => _all.Add(task);
         public void Update(WarehouseTask task) { }

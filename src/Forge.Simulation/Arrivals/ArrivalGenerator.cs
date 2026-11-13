@@ -123,6 +123,66 @@ public sealed class ArrivalGenerator
     }
 
     /// <summary>
+    /// Materialize one inbound train visit as a batch of gel receipts (demand-weighted gel mix).
+    /// Used when the train lifecycle finishes Approaching and needs cargo on the rail.
+    /// </summary>
+    public async Task<int> GenerateTrainBatchAsync(
+        DateTimeOffset now,
+        double demandMultiplier,
+        int lotCount,
+        CancellationToken ct = default)
+    {
+        if (lotCount <= 0 || _gelTypes.Count == 0 || _dockBays.Count == 0)
+        {
+            return 0;
+        }
+
+        var rng = new Rng(Mix(_seed, unchecked((ulong)now.UtcTicks) ^ 0x54724149UL));
+
+        int count = Math.Clamp(lotCount, 1, VisualTrainLotCap);
+        // Bias quantity toward demand pressure.
+        double pressure = Math.Clamp(demandMultiplier, 0.25, 4.0);
+        int qtyBase = (int)Math.Round(_minQuantity + (_maxQuantity - _minQuantity) * 0.15 * pressure);
+
+        int issued = 0;
+        var dockBayId = _dockBays[0];
+        for (int i = 0; i < count; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            // Uniform gel mix across the catalog so put-away fans out across temperature bands.
+            int gelIndex = rng.NextInt(_gelTypes.Count);
+            var gelTypeId = _gelTypes[gelIndex];
+            int quantity = Math.Clamp(qtyBase + rng.NextInt(8), _minQuantity, _maxQuantity);
+            long ageTicks = _maxProductionAge.Ticks <= 0
+                ? 0
+                : (long)(rng.NextDouble() * _maxProductionAge.Ticks);
+            var producedAt = now - TimeSpan.FromTicks(ageTicks);
+
+            var cmd = new RecordInboundGelReceiptCommand(gelTypeId, producedAt, quantity, dockBayId);
+            await _gateway.RecordInboundGelReceiptAsync(cmd, ct).ConfigureAwait(false);
+            issued++;
+        }
+
+        return issued;
+    }
+
+    private const int VisualTrainLotCap = 40;
+
+    private static int WeightedGelIndex(ref Rng rng, int gelCount, double pressure)
+    {
+        if (gelCount <= 1)
+        {
+            return 0;
+        }
+
+        // Higher pressure → more weight on early catalog gels (hot sellers).
+        double r = rng.NextDouble();
+        double skewed = Math.Pow(r, 1.0 / Math.Max(0.5, pressure));
+        int idx = (int)(skewed * gelCount);
+        return Math.Clamp(idx, 0, gelCount - 1);
+    }
+
+    /// <summary>
     /// Pure command construction for the given window: identical inputs (seed, window start, delta,
     /// rate, catalogs) always produce an identical, ordered list. Exposed for reproducibility tests
     /// and reused by <see cref="GenerateAsync"/> so what is tested is exactly what is issued.

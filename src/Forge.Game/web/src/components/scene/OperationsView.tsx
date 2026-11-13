@@ -3,16 +3,22 @@
 /**
  * The pseudo-3D top-down / slight-isometric operations view (task 37.2; Req 24.2, 24.3).
  *
- * Composes the authoritative snapshot into an R3F scene: temperature-zone floors, gel-lot
- * cubes, moving agents, and docked starships. The camera is a fixed slight-isometric
- * overhead angle (RollerCoaster-Tycoon style); OrbitControls allow basic orbit/zoom/pan
- * but are constrained so the camera can never flip to a degenerate edge-on/profile view.
- * Everything drawn comes from the authoritative DTOs — the view computes no rules.
+ * Motion (agents / ships / train) comes from motionStore via useFrame — not React props —
+ * so PositionsUpdate does not remount the scene tree.
  */
 
 import { OrbitControls } from "@react-three/drei";
-import { Canvas } from "@react-three/fiber";
-import { memo, useCallback, useMemo, useRef, useState } from "react";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import * as THREE from "three";
 
 import type { SimulationSnapshotDto } from "@/lib/contracts";
 import {
@@ -20,37 +26,179 @@ import {
   groupLotsByZone,
   layoutZones,
 } from "@/lib/layout";
+import {
+  getMotion,
+  getMotionIdentityVersion,
+  subscribeMotionIdentity,
+} from "@/lib/motionStore";
 
 import { Agents } from "./Agents";
+import { IdleBay } from "./IdleBay";
 import { Lots } from "./Lots";
+import { ReceivingTrain } from "./ReceivingTrain";
 import { Starships } from "./Starships";
+import { WarehouseFloor } from "./WarehouseFloor";
 import { Zones } from "./Zones";
 
 interface OperationsViewProps {
   snapshot: SimulationSnapshotDto;
 }
 
-/**
- * Only the SPATIAL parts of the snapshot drive the scene. Metrics / operator-parameter / event
- * updates arrive far more frequently (roughly every tick) but do not change what is drawn, so we
- * memoize on the spatial array identities. The reducer keeps zones/lots/agents/starships references
- * stable across a metrics-only update, so this prevents the scene from rebuilding — and its GPU
- * resources from churning — dozens of times a second (which was losing the WebGL context).
- */
-function SceneCanvas({
-  snapshot,
+function lightingForHour(hour: number): {
+  ambient: number;
+  dir: number;
+  hemi: number;
+  bg: string;
+  sky: string;
+  ground: string;
+} {
+  if (hour >= 7 && hour < 18) {
+    return {
+      ambient: 0.85,
+      dir: 1.15,
+      hemi: 0.45,
+      bg: "#0b0f14",
+      sky: "#9fb8d6",
+      ground: "#20252e",
+    };
+  }
+  if (hour >= 5 && hour < 7) {
+    return {
+      ambient: 0.45,
+      dir: 0.7,
+      hemi: 0.35,
+      bg: "#121018",
+      sky: "#c48a6a",
+      ground: "#1a1520",
+    };
+  }
+  if (hour >= 18 && hour < 20) {
+    return {
+      ambient: 0.4,
+      dir: 0.55,
+      hemi: 0.3,
+      bg: "#100e16",
+      sky: "#a06050",
+      ground: "#18141c",
+    };
+  }
+  return {
+    ambient: 0.22,
+    dir: 0.25,
+    hemi: 0.18,
+    bg: "#05070c",
+    sky: "#1a2230",
+    ground: "#0a0c10",
+  };
+}
+
+function DayNightLights() {
+  const ambientRef = useRef<THREE.AmbientLight>(null);
+  const dirRef = useRef<THREE.DirectionalLight>(null);
+  const hemiRef = useRef<THREE.HemisphereLight>(null);
+
+  useFrame(({ scene }) => {
+    const iso = getMotion().simulatedAt;
+    let hour = 12;
+    if (iso) {
+      const d = new Date(iso);
+      if (!Number.isNaN(d.getTime())) {
+        hour = d.getUTCHours() + d.getUTCMinutes() / 60;
+      }
+    }
+    const L = lightingForHour(hour);
+    if (ambientRef.current) ambientRef.current.intensity = L.ambient;
+    if (dirRef.current) dirRef.current.intensity = L.dir;
+    if (hemiRef.current) {
+      hemiRef.current.intensity = L.hemi;
+      hemiRef.current.color.set(L.sky);
+      hemiRef.current.groundColor.set(L.ground);
+    }
+    if (scene.background instanceof THREE.Color) {
+      scene.background.set(L.bg);
+    }
+  });
+
+  return (
+    <>
+      <color attach="background" args={["#0b0f14"]} />
+      <ambientLight ref={ambientRef} intensity={0.8} />
+      <directionalLight ref={dirRef} position={[30, 50, 20]} intensity={1.1} />
+      <hemisphereLight ref={hemiRef} args={["#9fb8d6", "#20252e", 0.4]} />
+    </>
+  );
+}
+
+function WebGlContextGuards({
   onContextLost,
   onContextRestored,
-}: OperationsViewProps & {
+}: {
   onContextLost: () => void;
   onContextRestored: () => void;
 }) {
-  const { zones, lots, agents, starships } = snapshot;
+  const gl = useThree((s) => s.gl);
+
+  useEffect(() => {
+    const canvas = gl.domElement;
+    const onLost = (e: Event) => {
+      e.preventDefault();
+      console.warn("[Forge scene] WebGL context lost — attempting restore.");
+      onContextLost();
+    };
+    const onRestored = () => {
+      console.info("[Forge scene] WebGL context restored.");
+      onContextRestored();
+    };
+    canvas.addEventListener("webglcontextlost", onLost, false);
+    canvas.addEventListener("webglcontextrestored", onRestored, false);
+    return () => {
+      canvas.removeEventListener("webglcontextlost", onLost, false);
+      canvas.removeEventListener("webglcontextrestored", onRestored, false);
+    };
+  }, [gl, onContextLost, onContextRestored]);
+
+  return null;
+}
+
+/** Bumps React when inbound/transit queue lengths change so zone lots hide correctly. */
+function useQueueVersion(): number {
+  const [version, setVersion] = useState(0);
+  const lastKey = useRef("");
+  useFrame(() => {
+    const m = getMotion();
+    const key = `${m.inboundQueueLotIds.length}:${m.inTransitLotIds.length}:${m.train?.lotIds.length ?? 0}:${m.train?.phase ?? ""}`;
+    if (key !== lastKey.current) {
+      lastKey.current = key;
+      setVersion((v) => v + 1);
+    }
+  });
+  return version;
+}
+
+function SceneContents({ snapshot }: { snapshot: SimulationSnapshotDto }) {
+  const { zones, lots } = snapshot;
+  const identityVersion = useSyncExternalStore(
+    subscribeMotionIdentity,
+    getMotionIdentityVersion,
+    getMotionIdentityVersion,
+  );
+  const queueVersion = useQueueVersion();
+
+  const visibleLots = useMemo(() => {
+    void identityVersion;
+    void queueVersion;
+    const m = getMotion();
+    const hidden = new Set([
+      ...(m.inboundQueueLotIds ?? []),
+      ...(m.inTransitLotIds ?? []),
+      ...(m.train?.lotIds ?? []),
+    ]);
+    return lots.filter((l) => !hidden.has(l.id));
+  }, [lots, identityVersion, queueVersion]);
 
   const placements = useMemo(() => layoutZones(zones), [zones]);
-  const lotsByZone = useMemo(() => groupLotsByZone(lots), [lots]);
+  const lotsByZone = useMemo(() => groupLotsByZone(visibleLots), [visibleLots]);
 
-  // Front docking edge derived from the zone grid extent.
   const edgeZ = useMemo(() => {
     let maxZ = 0;
     for (const p of placements) {
@@ -60,84 +208,78 @@ function SceneCanvas({
   }, [placements]);
 
   return (
-    <Canvas
-      // NOTE: shadows are intentionally OFF. Shadow maps are a heavy GPU allocation and a common
-      // trigger for "context lost" on page refresh (the previous context is not always torn down
-      // before the new one is created). The readable operations view does not need them.
-      dpr={[1, 1.5]}
-      className="h-full w-full"
-      // A perspective camera at a fixed tycoon-style overhead-ish angle. Perspective (not
-      // orthographic-with-negative-near) avoids the projection edge cases that flipped the view to a
-      // profile. We do NOT request "high-performance" powerPreference: forcing a GPU switch is itself
-      // a context-loss trigger on multi-GPU machines. antialias off keeps the context lighter.
-      camera={{ position: [40, 44, 46], fov: 35, near: 0.1, far: 2000 }}
-      gl={{ antialias: false, powerPreference: "default", failIfMajorPerformanceCaveat: false }}
-      onCreated={({ gl }) => {
-        const canvas = gl.domElement;
-        canvas.addEventListener(
-          "webglcontextlost",
-          (e) => {
-            // Tell the browser we intend to restore so it keeps the canvas recoverable.
-            e.preventDefault();
-            console.warn("[Forge scene] WebGL context lost — attempting restore.");
-            onContextLost();
-          },
-          false,
-        );
-        canvas.addEventListener(
-          "webglcontextrestored",
-          () => {
-            console.info("[Forge scene] WebGL context restored.");
-            onContextRestored();
-          },
-          false,
-        );
-      }}
-    >
-      <color attach="background" args={["#0b0f14"]} />
-
+    <>
+      <DayNightLights />
       <OrbitControls
         makeDefault
         enablePan
         enableZoom
         enableRotate
         target={[0, 0, 0]}
-        // Keep the camera above the floor: never allow it to drop to (or past) horizontal,
-        // which is what produced the "profile view" before the crash.
         minPolarAngle={0.15}
         maxPolarAngle={Math.PI / 2 - 0.15}
         minDistance={20}
         maxDistance={220}
       />
-
-      <ambientLight intensity={0.8} />
-      <directionalLight position={[30, 50, 20]} intensity={1.1} />
-      <hemisphereLight args={["#9fb8d6", "#20252e", 0.4]} />
-
+      <WarehouseFloor
+        placements={placements}
+        openDockBays={snapshot.parameters.openDockBays}
+      />
+      <IdleBay />
       <Zones placements={placements} lotsByZone={lotsByZone} />
       <Lots placements={placements} lotsByZone={lotsByZone} />
-      <Agents agents={agents} />
-      <Starships starships={starships} edgeZ={edgeZ} />
+      <ReceivingTrain simSpeed={snapshot.parameters.simSpeed} />
+      <Agents simSpeed={snapshot.parameters.simSpeed} />
+      <Starships
+        edgeZ={edgeZ}
+        openDockBays={snapshot.parameters.openDockBays}
+        simSpeed={snapshot.parameters.simSpeed}
+      />
+    </>
+  );
+}
+
+function SceneCanvas({
+  snapshot,
+  onContextLost,
+  onContextRestored,
+}: OperationsViewProps & {
+  onContextLost: () => void;
+  onContextRestored: () => void;
+}) {
+  return (
+    <Canvas
+      dpr={[1, 1.5]}
+      className="h-full w-full"
+      camera={{ position: [40, 44, 46], fov: 35, near: 0.1, far: 2000 }}
+      gl={{ antialias: false, powerPreference: "default", failIfMajorPerformanceCaveat: false }}
+    >
+      <WebGlContextGuards
+        onContextLost={onContextLost}
+        onContextRestored={onContextRestored}
+      />
+      <SceneContents snapshot={snapshot} />
     </Canvas>
   );
 }
 
-/**
- * Owns active context-loss recovery. A lost WebGL context does NOT throw a React error, so an
- * error boundary can't catch it — the canvas just goes white. When the browser fires
- * `webglcontextlost` and does NOT follow with `webglcontextrestored` shortly after, we force a
- * full remount of the Canvas by bumping a React key. Remounting builds a brand-new GL context
- * from scratch, which reliably recovers even on drivers that refuse the browser's own restore.
- */
 function OperationsViewImpl({ snapshot }: OperationsViewProps) {
   const [canvasKey, setCanvasKey] = useState(0);
   const restoreTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (restoreTimer.current) {
+        clearTimeout(restoreTimer.current);
+        restoreTimer.current = null;
+      }
+    };
+  }, []);
 
   const handleContextLost = useCallback(() => {
     if (restoreTimer.current) {
       clearTimeout(restoreTimer.current);
     }
-    // Give the browser a brief window to restore on its own; if it doesn't, force a remount.
     restoreTimer.current = setTimeout(() => {
       console.warn("[Forge scene] context not restored — remounting canvas.");
       setCanvasKey((k) => k + 1);
@@ -162,15 +304,11 @@ function OperationsViewImpl({ snapshot }: OperationsViewProps) {
   );
 }
 
-/**
- * Memoized so the scene only re-renders when a spatial array actually changes identity — not on the
- * frequent metrics/parameter/event updates that share the same spatial references.
- */
 export const OperationsView = memo(
   OperationsViewImpl,
   (prev, next) =>
     prev.snapshot.zones === next.snapshot.zones &&
     prev.snapshot.lots === next.snapshot.lots &&
-    prev.snapshot.agents === next.snapshot.agents &&
-    prev.snapshot.starships === next.snapshot.starships,
+    prev.snapshot.parameters.simSpeed === next.snapshot.parameters.simSpeed &&
+    prev.snapshot.parameters.openDockBays === next.snapshot.parameters.openDockBays,
 );

@@ -1,5 +1,6 @@
 using Forge.Application.Abstractions;
 using Forge.Application.Abstractions.Commands;
+using Forge.Application.Simulation;
 using Forge.Contracts.Dtos;
 using Forge.Domain.ColdChain;
 using Forge.Domain.Colonies;
@@ -9,6 +10,7 @@ using Forge.Simulation.Arrivals;
 using Forge.Simulation.Clock;
 using Forge.Simulation.Demand;
 using Forge.Simulation.Temperature;
+using Forge.Application.OperatorParameters;
 
 namespace Forge.Tests.Simulation;
 
@@ -109,15 +111,41 @@ public sealed class SimulationHostedServiceTests
         var catalog = new FakeCatalog();
         var options = new SimulationDriverOptions { InitialArrivalRatePerHour = 1000.0, DemandMultiplier = 1.0 };
 
+        var operatorParameters = new OperatorParameterState(
+            new OperatorParameterOptions
+            {
+                WorkerMax = 25,
+                ModeledDockBays = 4,
+                InitialInboundRate = options.InitialArrivalRatePerHour,
+                InitialDemandMultiplier = options.DemandMultiplier,
+                // Keep legacy Poisson for these unit tests (train scheduler disabled).
+                InitialTrainsPerDay = 0,
+            });
+
         var arrivals = new ArrivalGenerator(gateway, options.ArrivalSeed, catalog.GelTypes, catalog.DockBays);
         var demand = new ColonyDemandSimulator(gateway, options.DemandSeed);
         var temperature = new TemperatureReadingGenerator(gateway, options.TemperatureSeed);
 
         var wall = new ManualWallClock(new DateTimeOffset(2000, 1, 1, 0, 0, 0, TimeSpan.Zero));
         var host = new SimulationHostedService(
-            clock, gateway, arrivals, demand, temperature, catalog, options, wall.Now);
+            clock,
+            gateway,
+            arrivals,
+            demand,
+            temperature,
+            catalog,
+            options,
+            operatorParameters,
+            new NullTickState(),
+            wall.Now);
 
         return (host, gateway, clock, wall);
+    }
+
+    private sealed class NullTickState : ITickStateProvider
+    {
+        public Task<TickState?> GetTickStateAsync(CancellationToken ct = default) =>
+            Task.FromResult<TickState?>(null);
     }
 
     [Fact]

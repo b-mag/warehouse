@@ -136,7 +136,9 @@ public sealed class SignalRStatePublisherTests
             OpenDockBays: 4,
             InboundRate: 7.0,
             DemandMultiplier: 1.5,
-            SlottingStrategy: "velocity");
+            SlottingStrategy: "velocity",
+            TrainsPerDay: 1.0,
+            ShipsPerDay: 4.0);
         await bus.PublishAsync(new OperatorParameterChanged(state, DateTimeOffset.UnixEpoch));
 
         await WithTimeout(notifier.WaitForPushesAsync());

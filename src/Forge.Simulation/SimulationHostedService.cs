@@ -1,4 +1,7 @@
 using Forge.Application.Abstractions;
+using Forge.Application.OperatorParameters;
+using Forge.Application.Simulation;
+using Forge.Domain.Common;
 using Forge.Simulation.Arrivals;
 using Forge.Simulation.Clock;
 using Forge.Simulation.Demand;
@@ -9,36 +12,6 @@ namespace Forge.Simulation;
 
 /// <summary>
 /// The Phase-1 Simulation tick loop (design "Simulation host / tick loop"; Req 10.1, 10.4, 10.5).
-/// A hosted background service that, on each wall-clock loop iteration:
-/// <list type="number">
-///   <item><description>
-///     measures the wall-clock delta since the previous iteration and asks the accelerated
-///     <see cref="SimulationClock"/> to <see cref="SimulationClock.Advance(TimeSpan)"/> by it,
-///     receiving the applied <i>simulated</i> delta (zero while paused — Req 10.5);
-///   </description></item>
-///   <item><description>
-///     while that applied delta is positive, generates inbound arrivals, colony demand, and
-///     temperature readings for the span and issues them to the WMS Core through
-///     <see cref="IWarehouseCommandGateway"/> (Req 11.1, 12.2, 6.2);
-///   </description></item>
-///   <item><description>
-///     then invokes core per-tick rule application via
-///     <see cref="IWarehouseCommandGateway.ApplyTickRulesAsync(TimeSpan, System.Threading.CancellationToken)"/>
-///     for the same simulated delta (Req 10.4).
-///   </description></item>
-/// </list>
-/// <para>
-/// <b>Pause/resume (Req 10.5).</b> Pausing is a property of the clock: while paused, <c>Advance</c>
-/// returns <see cref="TimeSpan.Zero"/>, so a tick generates nothing and does not apply rules — the
-/// loop keeps spinning cheaply until the clock is resumed. <see cref="Pause"/>/<see cref="Resume"/>
-/// forward to the clock for convenience.
-/// </para>
-/// <para>
-/// <b>Testability / determinism.</b> The loop's wall-time source (<see cref="_wallClock"/>) and the
-/// inter-iteration delay are injectable, and a single iteration is exposed as
-/// <see cref="TickOnceAsync(System.Threading.CancellationToken)"/>, so tests can drive the loop step
-/// by step against a controllable clock with no dependence on real wall-clock timing.
-/// </para>
 /// </summary>
 public sealed class SimulationHostedService : BackgroundService
 {
@@ -49,28 +22,12 @@ public sealed class SimulationHostedService : BackgroundService
     private readonly TemperatureReadingGenerator _temperature;
     private readonly ISimulationCatalogProvider _catalog;
     private readonly SimulationDriverOptions _options;
+    private readonly OperatorParameterState _operatorParameters;
+    private readonly ITickStateProvider _tickState;
     private readonly Func<DateTimeOffset> _wallClock;
 
-    // The wall-clock instant of the previous iteration; the delta between it and "now" is what the
-    // simulated clock scales. Null until the first tick establishes a baseline (the first tick applies
-    // no delta so a startup pause does not fast-forward simulated time).
     private DateTimeOffset? _lastWallTick;
 
-    /// <summary>
-    /// Create the tick loop over the accelerated clock, the four generators, the catalog seam, and the
-    /// core command gateway.
-    /// </summary>
-    /// <param name="clock">The accelerated simulation clock (also registered as the core's <see cref="IClock"/>).</param>
-    /// <param name="gateway">The WMS Core command entrypoint used to issue inputs and apply tick rules.</param>
-    /// <param name="arrivals">The inbound-arrival generator.</param>
-    /// <param name="demand">The authoritative colony-demand generator.</param>
-    /// <param name="temperature">The temperature-reading generator.</param>
-    /// <param name="catalog">The catalog seam supplying what to generate against each tick.</param>
-    /// <param name="options">Tunable seeds, operator parameters, and loop cadence.</param>
-    /// <param name="wallClock">
-    /// The wall-time source used to measure iteration deltas; defaults to <see cref="DateTimeOffset.UtcNow"/>.
-    /// Injectable so tests advance it deterministically.
-    /// </param>
     public SimulationHostedService(
         SimulationClock clock,
         IWarehouseCommandGateway gateway,
@@ -79,6 +36,8 @@ public sealed class SimulationHostedService : BackgroundService
         TemperatureReadingGenerator temperature,
         ISimulationCatalogProvider catalog,
         SimulationDriverOptions options,
+        OperatorParameterState operatorParameters,
+        ITickStateProvider tickState,
         Func<DateTimeOffset>? wallClock = null)
     {
         ArgumentNullException.ThrowIfNull(clock);
@@ -88,6 +47,7 @@ public sealed class SimulationHostedService : BackgroundService
         ArgumentNullException.ThrowIfNull(temperature);
         ArgumentNullException.ThrowIfNull(catalog);
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(tickState);
 
         _clock = clock;
         _gateway = gateway;
@@ -96,23 +56,21 @@ public sealed class SimulationHostedService : BackgroundService
         _temperature = temperature;
         _catalog = catalog;
         _options = options;
+        _operatorParameters = operatorParameters ?? throw new ArgumentNullException(nameof(operatorParameters));
+        _tickState = tickState;
         _wallClock = wallClock ?? (() => DateTimeOffset.UtcNow);
     }
 
-    /// <summary>Pause simulated-time advancement; ticks become no-ops until <see cref="Resume"/> (Req 10.5).</summary>
     public void Pause() => _clock.Pause();
 
-    /// <summary>Resume simulated-time advancement after a <see cref="Pause"/>.</summary>
     public void Resume() => _clock.Resume();
 
-    /// <summary>
-    /// The background loop: repeatedly run one tick then wait <see cref="SimulationDriverOptions.LoopInterval"/>,
-    /// until the host requests stop (Req 10.1). Cancellation ends the loop promptly.
-    /// </summary>
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Establish the baseline so the first measured delta is small, not "since epoch".
         _lastWallTick = _wallClock();
+
+        // Align clock mode with operator sim-speed default (both default to 60×).
+        ApplySimSpeedToClock(_operatorParameters.SimSpeed);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -124,18 +82,11 @@ public sealed class SimulationHostedService : BackgroundService
             }
             catch (OperationCanceledException)
             {
-                // Stop requested during the inter-iteration wait; exit the loop cleanly.
                 break;
             }
         }
     }
 
-    /// <summary>
-    /// Run exactly one tick: measure the wall delta since the last tick, advance the clock, and — only
-    /// if the applied simulated delta is positive — generate inputs for the span and apply core tick
-    /// rules for that same delta (Req 10.4, 10.5, 11.1, 12.2, 6.2). Exposed for deterministic testing.
-    /// </summary>
-    /// <param name="ct">Cancellation token; observed between steps.</param>
     public async Task TickOnceAsync(CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
@@ -145,56 +96,184 @@ public sealed class SimulationHostedService : BackgroundService
         _lastWallTick = now;
 
         var wallDelta = now - previous;
-
-        // The simulated span the tick covers begins at the clock's current time.
         var windowStart = _clock.Now;
-
-        // Convert wall time to simulated time via the clock's mode/factor. Paused → zero (Req 10.5).
         var simDelta = _clock.Advance(wallDelta);
         if (simDelta <= TimeSpan.Zero)
         {
-            // Paused or no elapsed wall time: generate nothing and do not apply rules.
             return;
         }
 
-        // 1) Generate driver inputs for the elapsed simulated span and issue them to the core.
         await GenerateInputsAsync(windowStart, simDelta, ct).ConfigureAwait(false);
 
-        // 2) Invoke core per-tick rule application for the same simulated delta (Req 10.4).
         ct.ThrowIfCancellationRequested();
         await _gateway.ApplyTickRulesAsync(simDelta, ct).ConfigureAwait(false);
+
+        // Train / ship inbound cargo is requested during lifecycle; materialize immediately so the
+        // next tick (and this wall tick's follow-up) can see lots on the dock.
+        await MaterializeTrainCargoIfNeededAsync(_clock.Now, ct).ConfigureAwait(false);
+        await MaterializeShipInboundIfNeededAsync(_clock.Now, ct).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Issue the three generated input streams for the span <c>[windowStart, windowStart + simDelta)</c>
-    /// against the current catalog. Ordering is fixed (arrivals, then demand, then temperature) so a
-    /// given (state, delta, seed) triple always produces the same sequence (reproducibility — Req 12.7).
-    /// </summary>
     private async Task GenerateInputsAsync(DateTimeOffset windowStart, TimeSpan simDelta, CancellationToken ct)
     {
-        // Inbound arrivals at the current operator arrival rate (Req 11.1, 20.5).
-        _arrivals.ArrivalRatePerHour = _options.InitialArrivalRatePerHour;
-        if (_catalog.GelTypes.Count > 0 && _catalog.DockBays.Count > 0)
+        // Scheduled trains-per-day owns inbound when &gt; 0; legacy Poisson only otherwise.
+        if (_operatorParameters.TrainsPerDay <= 0)
         {
-            await _arrivals.GenerateAsync(windowStart, simDelta, ct).ConfigureAwait(false);
+            _arrivals.ArrivalRatePerHour = _operatorParameters.InboundRate;
+            if (_catalog.GelTypes.Count > 0 && _catalog.DockBays.Count > 0)
+            {
+                await _arrivals.GenerateAsync(windowStart, simDelta, ct).ConfigureAwait(false);
+            }
         }
 
-        // Authoritative colony demand scaled by the operator multiplier (Req 12.2, 20.6).
         ct.ThrowIfCancellationRequested();
         if (_catalog.Colonies.Count > 0)
         {
             await _demand
-                .GenerateAsync(_catalog.Colonies, windowStart, simDelta, _options.DemandMultiplier, ct)
+                .GenerateAsync(
+                    _catalog.Colonies,
+                    windowStart,
+                    simDelta,
+                    _operatorParameters.DemandMultiplier,
+                    ct)
                 .ConfigureAwait(false);
         }
 
-        // Temperature readings per lot/zone (Req 6.2).
         ct.ThrowIfCancellationRequested();
         if (_catalog.TemperatureTargets.Count > 0)
         {
             await _temperature
                 .GenerateAsync(_catalog.TemperatureTargets, windowStart, simDelta, ct)
                 .ConfigureAwait(false);
+        }
+    }
+
+    private async Task MaterializeTrainCargoIfNeededAsync(DateTimeOffset now, CancellationToken ct)
+    {
+        var state = await _tickState.GetTickStateAsync(ct).ConfigureAwait(false);
+        if (state is null)
+        {
+            return;
+        }
+
+        var train = state.Train;
+        if (!train.NeedsCargoMaterialization || train.CargoMaterialized)
+        {
+            return;
+        }
+
+        if (_catalog.GelTypes.Count == 0 || _catalog.DockBays.Count == 0)
+        {
+            train.NeedsCargoMaterialization = false;
+            return;
+        }
+
+        var before = new HashSet<GelLotId>(state.InboundQueueLotIds);
+        int lotCount = Math.Max(
+            1,
+            (int)Math.Round(
+                VisualSimulationConstants.TrainLotsPerVisit *
+                Math.Clamp(_operatorParameters.DemandMultiplier, 0.5, 3.0)));
+
+        await _arrivals
+            .GenerateTrainBatchAsync(now, _operatorParameters.DemandMultiplier, lotCount, ct)
+            .ConfigureAwait(false);
+
+        // Re-read queue after receipts enqueued put-aways.
+        state = await _tickState.GetTickStateAsync(ct).ConfigureAwait(false);
+        if (state is null)
+        {
+            return;
+        }
+
+        var newLots = new List<GelLotId>();
+        foreach (var id in state.InboundQueueLotIds)
+        {
+            if (!before.Contains(id))
+            {
+                newLots.Add(id);
+            }
+        }
+
+        state.Train.MarkCargoMaterialized(newLots, now);
+    }
+
+    private async Task MaterializeShipInboundIfNeededAsync(DateTimeOffset now, CancellationToken ct)
+    {
+        var state = await _tickState.GetTickStateAsync(ct).ConfigureAwait(false);
+        if (state is null)
+        {
+            return;
+        }
+
+        if (_catalog.GelTypes.Count == 0 || _catalog.DockBays.Count == 0)
+        {
+            foreach (var rt in state.StarshipRuntimes.Values)
+            {
+                if (rt.NeedsInboundMaterialization)
+                {
+                    rt.NeedsInboundMaterialization = false;
+                    rt.PendingInboundLotCount = 0;
+                    rt.UnloadRemaining = 0;
+                }
+            }
+
+            return;
+        }
+
+        foreach (var ship in state.Starships.OrderBy(s => s.Id))
+        {
+            if (!state.StarshipRuntimes.TryGetValue(ship.Id, out var rt))
+            {
+                continue;
+            }
+
+            if (!rt.NeedsInboundMaterialization || rt.InboundCargoMaterialized)
+            {
+                continue;
+            }
+
+            int lotCount = Math.Max(1, rt.PendingInboundLotCount);
+            var before = new HashSet<GelLotId>(state.InboundQueueLotIds);
+
+            await _arrivals
+                .GenerateTrainBatchAsync(now, _operatorParameters.DemandMultiplier, lotCount, ct)
+                .ConfigureAwait(false);
+
+            state = await _tickState.GetTickStateAsync(ct).ConfigureAwait(false);
+            if (state is null || !state.StarshipRuntimes.TryGetValue(ship.Id, out rt))
+            {
+                return;
+            }
+
+            var newLots = new List<GelLotId>();
+            foreach (var id in state.InboundQueueLotIds)
+            {
+                if (!before.Contains(id))
+                {
+                    newLots.Add(id);
+                }
+            }
+
+            rt.MarkInboundMaterialized(newLots);
+            rt.PhaseEnteredAt = now; // restart approach with cargo aboard
+            _ = ship.SetLoadedQuantity(Math.Min(ship.CargoCapacity, newLots.Count));
+        }
+    }
+
+    private void ApplySimSpeedToClock(double simSpeed)
+    {
+        if (simSpeed <= 0)
+        {
+            _clock.Configure(ClockMode.Paused, 1.0);
+        }
+        else if (Math.Abs(simSpeed - 1.0) < 0.0001)
+        {
+            _clock.Configure(ClockMode.RealTime, 1.0);
+        }
+        else
+        {
+            _clock.Configure(ClockMode.Accelerated, simSpeed);
         }
     }
 }

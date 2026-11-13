@@ -9,4 +9,6 @@ public sealed record OperatorParameterStateDto(
     int OpenDockBays,
     double InboundRate,
     double DemandMultiplier,
-    string SlottingStrategy);
+    string SlottingStrategy,
+    double TrainsPerDay,
+    double ShipsPerDay);
